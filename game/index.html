@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="description" content="La Vega 3D — an open-world crime game in the city of La Vega. 12 missions, smart police, living NPCs, boats, helicopters and a full day/night city. Built for the make.fun gta6-01 bounty.">
+<title>La Vega — Open World</title>
+<noscript><p style="padding:20px;font-family:sans-serif">La Vega 3D needs JavaScript and WebGL to run.</p></noscript>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0e1a; font-family: 'Segoe UI', Arial, sans-serif; color: #fff; }
+  canvas { display: block; touch-action: none; }
+  body { touch-action: none; overscroll-behavior: none; }
+  .hidden { display: none !important; }
+  .lv-fade { opacity: 0 !important; transition: opacity .6s; }
+  .lv-crosshair { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); font-size: 26px; font-weight: 900; color: rgba(255,255,255,.85); text-shadow: 0 0 4px #000; pointer-events: none; z-index: 5; }
+
+  /* ---------- loading ---------- */
+  .lv-loading { position: fixed; inset: 0; z-index: 100; background: linear-gradient(160deg, #1a0b2e, #0a0e1a 60%, #123); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; }
+  .lv-loading-title { font-size: 64px; font-weight: 900; letter-spacing: 10px; color: #ffd34d; text-shadow: 0 0 30px rgba(255, 211, 77, .5); }
+  .lv-loading-sub { font-size: 16px; color: #bcd; }
+  .lv-loading-bar { width: min(420px, 80vw); height: 10px; background: #223; border-radius: 5px; overflow: hidden; }
+  .lv-loading-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #ff2a9d, #ffd34d); transition: width .2s; }
+  .lv-loading-pct { font-size: 14px; color: #ffd34d; }
+  .lv-loading-tip { font-size: 13px; color: #8ab; max-width: 80vw; text-align: center; }
+
+  /* ---------- menu ---------- */
+  .lv-menu { position: fixed; inset: 0; z-index: 90; background: linear-gradient(160deg, rgba(26,11,46,.92), rgba(10,14,26,.94)), #0a0e1a; display: flex; align-items: center; justify-content: center; overflow-y: auto; }
+  .lv-menu-inner { text-align: center; padding: 24px; max-width: 560px; }
+  .lv-title { font-size: min(72px, 14vw); font-weight: 900; letter-spacing: 12px; color: #ffd34d; text-shadow: 0 0 40px rgba(255, 42, 157, .6); }
+  .lv-subtitle { color: #cde; font-size: 15px; margin: 8px 0 22px; }
+  .lv-menu-btns { display: flex; flex-direction: column; gap: 10px; }
+  .lv-btn { background: #1c2b45; color: #fff; border: 1px solid #3a5a8a; border-radius: 8px; padding: 12px 22px; font-size: 16px; font-weight: 700; cursor: pointer; letter-spacing: 1px; }
+  .lv-btn:hover { background: #2a4066; }
+  .lv-btn-primary { background: linear-gradient(90deg, #ff2a9d, #ff7a1a); border: none; }
+  .lv-btn-primary:hover { filter: brightness(1.15); }
+  .lv-btn-small { padding: 6px 12px; font-size: 13px; }
+  .lv-btn-char.active { border-color: #ffd34d; background: #3a2f10; color: #ffd34d; }
+  .lv-char-row { display: flex; gap: 8px; align-items: center; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+  .lv-char-label { color: #bcd; font-size: 14px; }
+  .lv-load-row { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+  .lv-menu-note { margin-top: 18px; color: #789; font-size: 12px; }
+
+  /* ---------- in-game HUD ---------- */
+  .lv-hud { position: fixed; inset: 0; z-index: 20; pointer-events: none; }
+  .lv-hud button, .lv-hud select, .lv-dialogue, .lv-phone, .lv-wheel, .lv-dealer, .lv-pause, .lv-settings, .lv-credits { pointer-events: auto; }
+  .lv-top { position: absolute; top: 0; left: 0; right: 0; display: flex; gap: 10px; align-items: center; padding: 8px 12px; background: linear-gradient(180deg, rgba(0,0,0,.55), transparent); font-size: 14px; flex-wrap: wrap; }
+  .lv-money { font-size: 20px; font-weight: 900; color: #7dff8a; text-shadow: 0 1px 2px #000; }
+  .lv-rank { color: #ffd34d; font-weight: 700; }
+  .lv-mission-top { color: #fff; flex: 1; min-width: 140px; }
+  .lv-clock, .lv-radio, .lv-weapon, .lv-collect { color: #cde; background: rgba(0,0,0,.35); padding: 3px 8px; border-radius: 6px; }
+  .lv-collect { color: #ffd34d; font-weight: 700; }
+  .lv-quality-pill { color: #ffd34d; background: rgba(0,0,0,.45); padding: 3px 8px; border-radius: 6px; cursor: pointer; font-weight: 700; border: 1px solid rgba(255,211,77,.4); }
+  .lv-pause-stats { color: #cde; font-size: 13px; margin: 6px 0 10px; text-align: center; }
+  .lv-stars { position: absolute; top: 52px; right: 12px; font-size: 26px; letter-spacing: 2px; text-shadow: 0 2px 4px #000; }
+  .lv-star { color: #555; }
+  .lv-star.on { color: #ffd34d; }
+  .lv-star.blink { animation: lvblink .5s infinite alternate; }
+  .lv-blink { animation: lvblink .4s infinite alternate; }
+  @keyframes lvblink { from { opacity: 1; } to { opacity: .35; } }
+  .lv-bars { position: absolute; top: 52px; left: 12px; width: 180px; display: flex; flex-direction: column; gap: 4px; }
+  .lv-bar { height: 10px; background: rgba(0,0,0,.5); border-radius: 5px; overflow: hidden; border: 1px solid rgba(255,255,255,.25); }
+  .lv-bar-hp .lv-fill { background: #3ddc5a; height: 100%; }
+  .lv-bar-armor .lv-fill { background: #4da3ff; height: 100%; }
+  .lv-bar-stam .lv-fill { background: #ffd34d; height: 100%; }
+  .lv-loc { position: absolute; bottom: 12px; left: 12px; font-size: 14px; font-weight: 700; color: #fff; text-shadow: 0 1px 3px #000; background: rgba(0,0,0,.35); padding: 4px 10px; border-radius: 6px; }
+  .lv-map-wrap { position: absolute; right: 12px; bottom: 12px; border: 2px solid rgba(255,255,255,.6); border-radius: 50%; overflow: hidden; width: 200px; height: 200px; box-shadow: 0 4px 16px rgba(0,0,0,.5); background: #223; }
+  .lv-map { width: 100%; height: 100%; display: block; }
+  .lv-mission-panel { position: absolute; top: 96px; left: 12px; background: rgba(0,0,0,.55); border-left: 4px solid #ffd34d; padding: 8px 12px; border-radius: 6px; font-size: 13px; line-height: 1.5; max-width: 320px; }
+  .lv-dispatch { position: absolute; top: 190px; right: 12px; background: rgba(10,10,40,.75); border: 1px solid #4da3ff; border-radius: 8px; padding: 8px 12px; font-size: 12px; line-height: 1.6; max-width: 280px; text-align: left; }
+  .lv-carhud { position: absolute; bottom: 12px; right: 224px; text-align: right; background: rgba(0,0,0,.5); padding: 8px 12px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
+  .lv-car-name { font-weight: 900; color: #ffd34d; }
+  .lv-car-speed { font-size: 22px; font-weight: 900; }
+  .lv-toasts { position: absolute; top: 140px; right: 12px; display: flex; flex-direction: column; gap: 6px; max-width: 320px; }
+  .lv-toast { background: rgba(0,0,0,.65); border-radius: 6px; padding: 8px 12px; font-size: 13px; transition: opacity .6s; }
+  .lv-social { position: absolute; top: 140px; left: 12px; display: flex; flex-direction: column; gap: 6px; max-width: 300px; }
+  .lv-social-post { background: rgba(20,20,60,.75); border-left: 3px solid #ff2a9d; border-radius: 6px; padding: 8px 10px; font-size: 13px; transition: opacity .6s; }
+  .lv-hint { position: absolute; bottom: 54px; left: 50%; transform: translateX(-50%); color: #ffd34d; font-size: 14px; font-weight: 700; text-shadow: 0 1px 3px #000; text-align: center; }
+  .lv-prompt { position: absolute; bottom: 84px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,.65); padding: 8px 16px; border-radius: 8px; font-size: 16px; font-weight: 700; border: 1px solid #ffd34d; }
+  .lv-dialogue { position: absolute; bottom: 120px; left: 50%; transform: translateX(-50%); width: min(640px, 92vw); background: rgba(10,10,30,.85); border: 1px solid #4da3ff; border-radius: 10px; padding: 12px 16px; cursor: pointer; }
+  .lv-dialogue-name { color: #ffd34d; font-weight: 900; font-size: 15px; margin-bottom: 4px; }
+  .lv-dialogue-text { font-size: 15px; line-height: 1.5; }
+  .lv-card { position: absolute; top: 22%; left: 50%; transform: translateX(-50%); text-align: center; background: rgba(0,0,0,.7); padding: 18px 34px; border-radius: 12px; border: 1px solid #ffd34d; transition: opacity .6s; max-width: 90vw; }
+  .lv-card-act { color: #ff2a9d; font-weight: 900; letter-spacing: 3px; font-size: 14px; }
+  .lv-card-title { font-size: 30px; font-weight: 900; color: #ffd34d; margin: 4px 0; }
+  .lv-card-text { color: #eee; font-size: 15px; }
+  .lv-reward { position: absolute; top: 38%; left: 50%; transform: translateX(-50%); text-align: center; font-size: 26px; color: #7dff8a; text-shadow: 0 2px 6px #000; font-weight: 900; }
+  .lv-drift { position: absolute; top: 30%; left: 50%; transform: translateX(-50%); font-size: 24px; font-weight: 900; color: #22e6ff; text-shadow: 0 2px 6px #000; }
+  .lv-flash { position: absolute; inset: 0; background: radial-gradient(ellipse at center, transparent 40%, rgba(255,0,0,.7)); opacity: 0; pointer-events: none; transition: opacity .15s; }
+  .lv-busted { position: absolute; inset: 0; background: rgba(20,0,0,.8); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; z-index: 40; }
+  .lv-busted-title { font-size: 64px; font-weight: 900; color: #ff2a2a; letter-spacing: 8px; }
+  .lv-busted-text { font-size: 16px; color: #eee; }
+  .lv-busted-sub { color: #ffd34d; }
+  .lv-help { position: absolute; bottom: 220px; right: 12px; width: 220px; font-size: 11px; color: #abc; background: rgba(0,0,0,.4); padding: 6px 8px; border-radius: 6px; line-height: 1.6; }
+  .lv-phone-btn { position: absolute; top: 100px; right: 12px; width: 52px; height: 52px; font-size: 26px; border-radius: 50%; background: rgba(0,0,0,.6); border: 2px solid #4da3ff; cursor: pointer; }
+  .lv-phone { position: absolute; right: 12px; top: 160px; width: 280px; max-height: 60vh; overflow-y: auto; background: rgba(8,12,28,.95); border: 2px solid #4da3ff; border-radius: 14px; padding: 12px; z-index: 30; }
+  .lv-phone-title { font-weight: 900; color: #4da3ff; text-align: center; margin-bottom: 8px; }
+  .lv-phone-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+  .lv-phone-tab { flex: 1; background: #1c2b45; color: #fff; border: none; border-radius: 6px; padding: 7px; cursor: pointer; }
+  .lv-phone-tab.active { background: #4da3ff; }
+  .lv-contact { background: #16223a; border-radius: 8px; padding: 9px 10px; margin-bottom: 6px; cursor: pointer; }
+  .lv-contact:hover { background: #22345a; }
+  .lv-contact-name { font-weight: 900; color: #ffd34d; }
+  .lv-contact-desc { font-size: 12px; color: #bcd; }
+  .lv-phone-post { background: #16223a; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; }
+  .lv-wheel { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(8,12,28,.95); border: 2px solid #ffd34d; border-radius: 14px; padding: 16px; text-align: center; z-index: 30; }
+  .lv-wheel-title { font-weight: 900; color: #ffd34d; margin-bottom: 10px; }
+  .lv-wheel-slot { display: block; width: 260px; margin: 6px auto; background: #1c2b45; color: #fff; border: 1px solid #3a5a8a; border-radius: 8px; padding: 10px; font-size: 15px; font-weight: 700; cursor: pointer; }
+  .lv-wheel-slot.active { border-color: #ffd34d; background: #3a2f10; }
+  .lv-wheel-slot:disabled { opacity: .4; cursor: default; }
+  .lv-wheel-items { display: flex; gap: 8px; justify-content: center; margin-top: 10px; }
+  .lv-wheel-item { background: #14331c; color: #7dff8a; border: 1px solid #2a7a3a; border-radius: 8px; padding: 8px 10px; cursor: pointer; font-size: 13px; }
+  .lv-dealer { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(520px, 92vw); max-height: 80vh; overflow-y: auto; background: rgba(8,12,28,.96); border: 2px solid #ffd34d; border-radius: 14px; padding: 16px; z-index: 30; }
+  .lv-dealer-title { font-weight: 900; color: #ffd34d; margin-bottom: 10px; text-align: center; }
+  .lv-dealer-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: #16223a; border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; font-size: 13px; }
+  .lv-pause, .lv-settings, .lv-credits { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); background: rgba(8,12,28,.97); border: 2px solid #4da3ff; border-radius: 14px; padding: 22px; width: min(440px, 92vw); max-height: 84vh; overflow-y: auto; text-align: center; z-index: 35; display: flex; flex-direction: column; gap: 10px; }
+  .lv-pause-title, .lv-settings-title, .lv-credits-title { font-size: 26px; font-weight: 900; color: #ffd34d; }
+  .lv-settings-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 14px; }
+  .lv-select { background: #1c2b45; color: #fff; border: 1px solid #3a5a8a; border-radius: 6px; padding: 6px 8px; }
+  .lv-credits-body { font-size: 13px; line-height: 1.7; color: #cde; text-align: left; }
+
+  /* ---------- touch controls ---------- */
+  .lv-touch { position: absolute; inset: 0; pointer-events: none; }
+  .lv-stick { position: absolute; left: 24px; bottom: 90px; width: 120px; height: 120px; border-radius: 50%; background: rgba(255,255,255,.12); border: 2px solid rgba(255,255,255,.35); pointer-events: auto; }
+  .lv-stick-knob { position: absolute; left: 50%; top: 50%; width: 52px; height: 52px; margin: -26px 0 0 -26px; border-radius: 50%; background: rgba(255,255,255,.45); }
+  .lv-touch-btns { position: absolute; right: 16px; bottom: 230px; display: grid; grid-template-columns: repeat(2, 64px); gap: 10px; pointer-events: auto; }
+  .lv-tbtn { width: 64px; height: 64px; border-radius: 50%; background: rgba(0,0,0,.5); border: 2px solid rgba(255,255,255,.5); color: #fff; font-size: 11px; font-weight: 900; }
+  .lv-tbtn:active { background: rgba(255,211,77,.6); }
+
+  /* ---------- responsive ---------- */
+  @media (orientation: portrait) {
+    .lv-map-wrap { width: 140px; height: 140px; }
+    .lv-carhud { right: 164px; }
+    .lv-bars { width: 130px; }
+    .lv-help { display: none; }
+    .lv-mission-panel { max-width: 240px; top: 110px; }
+    .lv-loading-title { font-size: 44px; }
+    .lv-title { letter-spacing: 6px; }
+  }
+  @media (max-width: 700px) {
+    .lv-help { display: none; }
+    .lv-mission-top { display: none; }
+    .lv-stars { font-size: 20px; top: 48px; }
+    .lv-social { display: none; }
+  }
+  body.lv-touch-mode .lv-help { display: none; }
+  body.lv-pc-mode .lv-touch { display: none; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./three/three.module.min.js",
+    "three/addons/loaders/GLTFLoader.js": "./three/addons/loaders/GLTFLoader.min.js",
+    "three/addons/utils/SkeletonUtils.js": "./three/addons/utils/SkeletonUtils.min.js",
+    "three/addons/utils/BufferGeometryUtils.js": "./three/addons/utils/BufferGeometryUtils.min.js"
+  }
+}
+</script>
+</head>
+<body>
+<script type="module">
+  import { Game } from './src/main.js';
+  const game = new Game();
+  window.__laVega = game;
+  game.boot().catch((e) => {
+    console.error(e);
+    const t = document.querySelector('.lv-loading-tip');
+    if (t) t.textContent = 'Failed to load: ' + (e && e.message ? e.message : e) + ' — please reload the page.';
+  });
+</script>
+</body>
+</html>
