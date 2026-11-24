@@ -18,6 +18,14 @@ import { HUD } from './hud.js';
 import { CrewManager } from './crew.js';
 import { StationsManager } from './stations.js';
 import { AmbienceSys } from './ambience.js';
+import { BusinessSystem } from './businesses.js';
+import { SideJobSystem } from './sidejobs.js';
+import { ScoringSystem } from './scoring.js';
+import { CustomizationSystem } from './customization.js';
+import { AnimalSystem } from './animals.js';
+import { NightMarketSystem } from './nightmarket.js';
+import { IslandSystem } from './island.js';
+import { TrailerSystem } from './trailer.js';
 
 const RANK_NAMES = ['NEWCOMER', 'STREET HUSTLER', 'WHEELMAN', 'CREW RUNNER', 'MADE DRIVER', 'LA VEGA LEGEND'];
 
@@ -106,6 +114,41 @@ export class Game {
     this.crew = new CrewManager(this);
     this.stations = new StationsManager(this);
     this.ambience = new AmbienceSys(this);
+    // Round-13 standalone modules (Thirteen): one shared ctx object; each
+    // constructor is guarded so a single module can never break the boot.
+    const self = this;
+    const modCtx = {
+      scene,
+      camera: this._camera,
+      weather: this.weather,
+      get player() { return self.player; },
+      money: {
+        get: () => (self.player ? self.player.money : 0),
+        add: (n) => { if (self.player) self.player.money += n; },
+        spend: (n) => { if (!self.player || self.player.money < n) return false; self.player.money -= n; return true; },
+        canAfford: (n) => !!self.player && self.player.money >= n,
+      },
+      notify: (t) => { if (self.hud) self.hud.notify(t); },
+      getHour: () => (self.weather ? self.weather.time : 12),
+      isNight: () => (self.weather ? self.weather.isNight() : false),
+      getBusinesses: () => self.businesses,
+      getNpcs: () => (self.characters ? self.characters.npcs : []),
+      getPlayerCar: () => (self.vehicles ? self.vehicles.playerCar : null),
+      getTraffic: () => (self.vehicles ? self.vehicles.traffic : []),
+      getCrew: () => (self.crew ? self.crew.members : []),
+      getPolice: () => (self.police ? self.police.units : []),
+      spawnNPC: (opts) => (self.characters ? self.characters.spawnNPC(opts) : null),
+      markers: { add() {}, remove() {} },
+    };
+    const safeMod = (fn) => { try { return fn(); } catch (e) { console.error('[mods]', e); return null; } };
+    this.biz = safeMod(() => new BusinessSystem(modCtx));
+    this.jobs = safeMod(() => new SideJobSystem(modCtx));
+    this.score = safeMod(() => new ScoringSystem(modCtx));
+    this.cust = safeMod(() => new CustomizationSystem(modCtx));
+    this.animals = safeMod(() => new AnimalSystem(modCtx));
+    this.market = safeMod(() => new NightMarketSystem(modCtx));
+    this.island = safeMod(() => new IslandSystem(modCtx));
+    this.trailer = safeMod(() => new TrailerSystem(modCtx));
     this._bindInput();
     this._applyControlMode('auto');
     this.hud.hideLoading();
@@ -156,6 +199,7 @@ export class Game {
       if (e.code === 'KeyZ' && !e.repeat) this.crew.command('regroup');
       if (e.code === 'KeyX' && e.shiftKey) this.crew.command('attack');
       if (e.code === 'KeyC' && !e.repeat) this.crew.command('hold');
+      if (e.code === 'KeyB' && !e.repeat && this.biz) this.biz.togglePanel();
       if ((e.code === 'KeyP' || e.code === 'Escape') && !e.repeat) this.togglePause();
       if (e.code.startsWith('Digit')) {
         const idx = +e.code.slice(5) - 1;
@@ -273,9 +317,11 @@ export class Game {
     p.money = 0;
     p.health = 100; p.armor = 0;
     p.giveWeapon('pistol', 0);
+    p.setWeapon('pistol');
     this.standing = { marina: 0, downtown: 0, neon: 0, beach: 0 };
     this.rank = 0; this.rankName = RANK_NAMES[0];
     this.ownedCars = [];
+    if (this.biz) this.biz.reset();
     this.camYaw = -Math.PI / 2;
     this.camDist = 8;
     this.camPitch = 0.3;
@@ -298,6 +344,7 @@ export class Game {
     this.rank = data.rank || 0;
     this.rankName = RANK_NAMES[Math.min(RANK_NAMES.length - 1, Math.floor(this.rank / 20))] || RANK_NAMES[0];
     this.businesses = data.businesses || {};
+    if (this.biz) this.biz.syncFromGame();
     if (this.missions && data.missions) this.missions.restore(data.missions);
     if (this.weather && data.time !== undefined) this.weather.setTime(data.time);
     if (this.audio && data.station !== undefined) this.audio.stationIdx = data.station;
@@ -337,10 +384,15 @@ export class Game {
     this.state = 'trailer';
     this.trailerT = 0;
     this.hud.hideMenu();
-    this.hud.showMissionCard('LA VEGA', 'OFFICIAL TRAILER', 'Twelve jobs. One island. No rules but yours.');
+    if (this.trailer) {
+      this.trailer.play(() => { if (this.state === 'trailer') this.endTrailer(); });
+    } else {
+      this.hud.showMissionCard('LA VEGA', 'OFFICIAL TRAILER', 'Twelve jobs. One island. No rules but yours.');
+    }
   }
 
   endTrailer() {
+    if (this.trailer) this.trailer.stop();
     this.state = 'menu';
     this.hud.hideMissionCard();
     this.hud.showMenu();
@@ -518,14 +570,21 @@ export class Game {
       this._camera.lookAt(130, 8, 130);
       this.city.update(dt, this.time);
       this.weather.update(dt, { x: 130, z: 130 });
+      if (this.island) this.island.update(dt);
+      if (this.animals) this.animals.update(dt);
+      if (this.market) this.market.update(dt);
     } else if (this.state === 'trailer') {
-      this.trailerT += dt;
-      if (this.trailerT > 34) this.endTrailer();
-      const t = this.trailerT;
-      const cx = 130 + Math.sin(t * 0.12) * 90;
-      const cz = 130 + Math.cos(t * 0.12) * 90;
-      this._camera.position.set(cx, 26 + Math.sin(t * 0.2) * 8, cz);
-      this._camera.lookAt(130, 6, 130);
+      if (this.trailer && this.trailer.getState().playing) {
+        this.trailer.update(dt);
+      } else {
+        this.trailerT += dt;
+        if (this.trailerT > 34) this.endTrailer();
+        const t = this.trailerT;
+        const cx = 130 + Math.sin(t * 0.12) * 90;
+        const cz = 130 + Math.cos(t * 0.12) * 90;
+        this._camera.position.set(cx, 26 + Math.sin(t * 0.2) * 8, cz);
+        this._camera.lookAt(130, 6, 130);
+      }
       this.city.update(dt, this.time);
       this.weather.update(dt, { x: 130, z: 130 });
     } else if (this.state === 'playing' && !this.paused) {
@@ -538,6 +597,14 @@ export class Game {
       this.crew.update(dt);
       this.stations.update(dt);
       this.ambience.update(dt);
+      if (this.biz) this.biz.update(dt);
+      if (this.jobs) this.jobs.update(dt);
+      if (this.score) this.score.update(dt);
+      if (this.cust) this.cust.update(dt);
+      if (this.animals) this.animals.update(dt);
+      if (this.market) this.market.update(dt);
+      if (this.island) this.island.update(dt);
+      if (this.trailer) this.trailer.update(dt);
       this.weather.update(dt, p);
       if (this.audio) this.audio.setSeaLevel(this.city.isInWater(p.x) ? 1 : 0);
       // Garage drive-in: slow car at Manny's door stores it.

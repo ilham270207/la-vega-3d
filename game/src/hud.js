@@ -112,7 +112,7 @@ export class HUD {
     el('div', 'lv-busted-title', this.bustedEl, 'BUSTED');
     el('div', 'lv-busted-text', this.bustedEl, 'The LVPD got you. Bail posted — you wake up at La Vega General.');
     this.helpEl = el('div', 'lv-help', this.root,
-      'WASD drive · E interact · F fire · Q punch · Tab weapons · T phone · P pause · R radio · H horn · N nitro · V camera · Space jump · Z crew regroup · X crew attack · C crew hold');
+      'WASD drive · E interact · F fire · Q punch · Tab weapons · T phone · P pause · R radio · H horn · N nitro · V camera · Space jump · Z crew regroup · X crew attack · C crew hold · B business');
     this.phoneBtn = el('button', 'lv-phone-btn', this.root, '☏');
     this.phoneBtn.onclick = () => this.togglePhone();
     this.phoneEl = el('div', 'lv-phone hidden', this.root);
