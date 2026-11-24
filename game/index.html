@@ -142,6 +142,14 @@
     .lv-mission-top { display: none; }
     .lv-stars { font-size: 20px; top: 48px; }
     .lv-social { display: none; }
+    /* R8: the top bar wraps to a second row on a 390px phone, and the
+       wrapped pills land on top of the health bars (52px) and the stars.
+       Keep the top bar to ONE row: hide the radio + quality pills (both
+       are still reachable from Settings) and tighten the spacing, so the
+       bars and stars below stay clear. */
+    .lv-top { font-size: 12px; gap: 6px; padding: 6px 8px; }
+    .lv-money { font-size: 17px; }
+    .lv-radio, .lv-quality-pill { display: none; }
   }
   body.lv-touch-mode .lv-help { display: none; }
   body.lv-pc-mode .lv-touch { display: none; }

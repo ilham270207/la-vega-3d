@@ -1,756 +1,967 @@
-// La Vega 3D — HUD (round 6 re-author).
+// La Vega 3D — HUD (round 8 re-author).
 //
-// Builds every DOM panel itself (index.html has no pre-built HUD) and keeps
-// it in sync with the game: money / health / armor / wanted stars, the
-// weapon label ("PISTOL 12 / 60"), the minimap canvas, the mission panel,
-// prompts, dialogue, the weapon wheel, the dealer + garage panels, the
-// phone, pause, menu, loading screen and touch controls.
-import { WEAPONS, CAR_MODELS, CAR_CATALOG, DISTRICTS, ROADS } from './config.js';
-import { clamp } from './rng.js';
-import { settings } from './settings.js';
+// Rebuilt from REFERENCE.md and the old build's HUD, which ilham liked:
+// circular minimap top-left, mission panel under it, money / stars /
+// rank / clock across the top, a big district banner that appears once
+// and leaves, a prompt pill at bottom-centre, health at bottom-left,
+// and a clean left-column menu over the live city.
+//
+// THE OVERLAP FIXES (ilham's phone screenshots, 24 Nov 10:08 WIB):
+//  (a) the menu title "LA VEGA" bled through the "OFFICIAL TRAILER"
+//      card — because the card stayed visible when the menu returned.
+//      Now showMenu() ALWAYS hides the mission card, the dialogue, and
+//      every in-game panel first. Nothing can bleed through the menu.
+//  (b) the "ACT I" mission card and the Jax dialogue overlapped the
+//      "LA VEGA Free roam" panel AND the touch buttons (FIRE/JUMP/ENTER/
+//      PUNCH covered the dialogue text). Now a single layer manager
+//      (_refreshLayers) owns visibility: while a card or a dialogue is
+//      open, the touch controls, the mission panel, the prompt, the
+//      hint, the dispatch board, the toasts and the social feed are ALL
+//      hidden; the dialogue dismisses the card first, so a card and a
+//      dialogue never share the screen. Touch controls also stay hidden
+//      during cutscenes and the trailer.
+//  (c) the district banner ("DOWNTOWN") is a separate, short-lived
+//      element: it shows once per district entry, fades after 3.5 s,
+//      and is suppressed entirely while a card, dialogue, cutscene or
+//      menu is up.
+//
+// Exports: HUD. The game drives it through setLoading / hideLoading /
+// showMenu / hideMenu / updateMissionPanel / showMissionCard /
+// showDialogue / showDialogueSequence / showReward / showBusted /
+// flashWanted / flashDamage / updateWeapon / updateCharacter / hint /
+// socialPost / districtName / notify / showPrompt / hidePrompt /
+// showPhone / showPause / showDealer / hideDealer / showGarage /
+// hideGarage / showWheel / hideWheel / showDrift / update(dt).
+import { WEAPONS, CAR_MODELS, CAR_CATALOG, DISTRICTS, STREET_NS, STREET_EW, ROADS } from './config.js';
+import { settings, effectiveControlMode } from './settings.js';
 
-const WEAPON_ORDER = ['fists', 'pistol', 'smg', 'shotgun', 'rifle'];
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 
-const CSS = `
-#lv-hud{position:fixed;inset:0;pointer-events:none;font-family:'Segoe UI',system-ui,sans-serif;color:#f2f5f7;z-index:10;overflow:hidden}
-#lv-hud .hidden{display:none!important}
-.lv-panel{background:rgba(10,12,20,.82);border:1px solid rgba(255,255,255,.14);border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.5);backdrop-filter:blur(3px)}
-.lv-btn{pointer-events:auto;cursor:pointer;background:linear-gradient(180deg,#ff2a9d,#d92038);color:#fff;border:none;border-radius:8px;padding:10px 18px;font-weight:700;font-size:15px;letter-spacing:.4px}
-.lv-btn:hover{filter:brightness(1.15)}
-.lv-btn.ghost{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.25)}
-.lv-topbar{position:absolute;top:10px;left:10px;display:flex;gap:10px;align-items:flex-start}
-.lv-stats{padding:8px 12px;min-width:210px}
-.lv-money{font-size:20px;font-weight:800;color:#7dff8a;text-shadow:0 1px 2px #000}
-.lv-bar{height:8px;background:rgba(255,255,255,.15);border-radius:4px;margin-top:5px;overflow:hidden}
-.lv-bar>i{display:block;height:100%;border-radius:4px}
-.lv-hp>i{background:linear-gradient(90deg,#22c3aa,#7dff8a)}
-.lv-armor>i{background:linear-gradient(90deg,#2a6fd6,#9ecfff)}
-.lv-barlabel{font-size:11px;opacity:.85;margin-top:2px}
-.lv-wanted{padding:8px 12px;text-align:center}
-.lv-stars{font-size:20px;letter-spacing:2px;color:#ffd34d;text-shadow:0 0 8px rgba(255,211,77,.7)}
-.lv-stars .off{color:rgba(255,255,255,.25);text-shadow:none}
-.lv-clock{padding:8px 12px;text-align:right;font-size:13px;line-height:1.5}
-.lv-clock b{font-size:16px}
-.lv-mission{position:absolute;top:10px;left:240px;max-width:340px;padding:10px 14px}
-.lv-mission h3{margin:0 0 4px;font-size:14px;color:#ffd34d;letter-spacing:.5px}
-.lv-mission p{margin:0;font-size:13px;line-height:1.45}
-.lv-minimap{position:absolute;left:10px;bottom:10px;width:190px;height:190px;border-radius:10px;border:2px solid rgba(255,255,255,.35);box-shadow:0 4px 16px rgba(0,0,0,.6);background:#0a1a2a}
-.lv-weapon{position:absolute;right:12px;bottom:12px;text-align:right;padding:8px 12px}
-.lv-weapon .lv-wname{font-size:20px;font-weight:800;letter-spacing:1px}
-.lv-weapon .lv-wammo{font-size:13px;opacity:.9}
-.lv-weapon .lv-wnitro{height:6px;background:rgba(255,255,255,.15);border-radius:3px;margin-top:5px;overflow:hidden}
-.lv-weapon .lv-wnitro>i{display:block;height:100%;background:linear-gradient(90deg,#ff8c1a,#ffd34d)}
-.lv-prompt{position:absolute;left:50%;bottom:110px;transform:translateX(-50%);padding:9px 18px;font-size:15px;font-weight:700;background:rgba(10,12,20,.85);border:1px solid rgba(255,255,255,.2);border-radius:8px;white-space:nowrap}
-.lv-dialogue{position:absolute;left:50%;bottom:170px;transform:translateX(-50%);width:min(560px,86vw);padding:14px 18px;cursor:pointer;pointer-events:auto}
-.lv-dialogue .lv-who{color:#ff8cb8;font-weight:800;font-size:14px;letter-spacing:.5px}
-.lv-dialogue .lv-line{font-size:16px;line-height:1.5;margin-top:4px}
-.lv-dialogue .lv-next{font-size:11px;opacity:.6;text-align:right;margin-top:6px}
-.lv-card{position:absolute;left:50%;top:22%;transform:translate(-50%,-50%);text-align:center;padding:22px 34px;pointer-events:none}
-.lv-card .lv-act{color:#ff8cb8;font-weight:800;letter-spacing:3px;font-size:13px}
-.lv-card h2{margin:6px 0;font-size:34px;letter-spacing:2px}
-.lv-card p{margin:0;font-size:15px;opacity:.9;max-width:520px}
-.lv-feed{position:absolute;top:64px;right:10px;width:300px;display:flex;flex-direction:column;gap:6px}
-.lv-toast{padding:8px 12px;font-size:13.5px;line-height:1.4;animation:lv-in .25s ease-out}
-@keyframes lv-in{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
-.lv-wheel{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;gap:10px;padding:14px;pointer-events:auto}
-.lv-wheel-slot{width:104px;padding:12px 8px;text-align:center;cursor:pointer;border-radius:8px;background:rgba(255,255,255,.08);border:2px solid transparent}
-.lv-wheel-slot:hover{border-color:#ff2a9d}
-.lv-wheel-slot.owned{border-color:rgba(255,211,77,.7)}
-.lv-wheel-slot.sel{border-color:#ff2a9d;background:rgba(255,42,157,.25)}
-.lv-wheel-slot .lv-sname{font-weight:800;font-size:14px}
-.lv-wheel-slot .lv-sammo{font-size:12px;opacity:.85;margin-top:4px}
-.lv-wheel-slot.locked{opacity:.45}
-.lv-shop{position:absolute;right:16px;top:50%;transform:translateY(-50%);width:340px;max-height:76vh;overflow:auto;padding:16px;pointer-events:auto}
-.lv-dealer-title{font-size:19px;font-weight:800;letter-spacing:1px;color:#ffd34d;margin-bottom:4px}
-.lv-dealer-sub{font-size:12.5px;opacity:.8;margin-bottom:10px}
-.lv-dealer-row{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 10px;margin-top:6px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);border-radius:8px;cursor:pointer;font-size:13.5px}
-.lv-dealer-row:hover{border-color:#ff2a9d;background:rgba(255,42,157,.15)}
-.lv-dealer-row .lv-price{color:#7dff8a;font-weight:800;white-space:nowrap}
-.lv-shop .lv-close{margin-top:12px;width:100%}
-.lv-phone{position:absolute;right:16px;bottom:90px;width:230px;padding:14px;pointer-events:auto;text-align:center}
-.lv-phone h3{margin:0 0 2px;font-size:17px}
-.lv-phone .lv-ptime{font-size:12px;opacity:.75;margin-bottom:10px}
-.lv-app{display:inline-block;width:60px;margin:6px 4px;padding:10px 0;background:rgba(255,255,255,.08);border-radius:10px;font-size:12px;cursor:pointer}
-.lv-app:hover{background:rgba(255,42,157,.3)}
-.lv-pause{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:300px;padding:22px;text-align:center;pointer-events:auto}
-.lv-pause h2{margin:0 0 14px;font-size:26px;letter-spacing:3px}
-.lv-pause .lv-btn{display:block;width:100%;margin-top:10px}
-.lv-menu{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:radial-gradient(ellipse at 50% 30%,rgba(255,42,157,.35),rgba(5,5,15,.88) 70%);pointer-events:auto;text-align:center}
-.lv-menu h1{font-size:64px;margin:0;letter-spacing:6px;text-shadow:0 0 30px rgba(255,42,157,.8),0 4px 0 #000}
-.lv-menu .lv-tag{font-size:16px;letter-spacing:4px;color:#9ecfff;margin:6px 0 22px}
-.lv-menu .lv-btn{width:260px;margin-top:10px;font-size:17px}
-.lv-charpick{display:flex;gap:12px;margin:6px 0 10px}
-.lv-char{width:120px;padding:12px;border-radius:10px;background:rgba(255,255,255,.08);border:2px solid transparent;cursor:pointer}
-.lv-char.sel{border-color:#ffd34d;background:rgba(255,211,77,.15)}
-.lv-char b{display:block;font-size:16px}
-.lv-char span{font-size:12px;opacity:.8}
-.lv-sub{width:min(480px,88vw);max-height:70vh;overflow:auto;padding:20px;text-align:left;pointer-events:auto}
-.lv-sub h2{margin:0 0 10px}
-.lv-sub label{display:block;margin:10px 0;font-size:14px}
-.lv-sub select,.lv-sub input{margin-left:8px}
-.lv-loading{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#07070f;pointer-events:auto}
-.lv-loading h1{font-size:44px;letter-spacing:6px;margin:0}
-.lv-loadbar{width:min(420px,80vw);height:12px;background:rgba(255,255,255,.15);border-radius:6px;margin-top:22px;overflow:hidden}
-.lv-loadbar>i{display:block;height:100%;background:linear-gradient(90deg,#ff2a9d,#ffd34d);width:0%}
-.lv-loadtext{margin-top:10px;font-size:13px;opacity:.8}
-.lv-touch{position:absolute;inset:0;pointer-events:none}
-.lv-stick{position:absolute;left:22px;bottom:210px;width:120px;height:120px;border-radius:50%;background:rgba(255,255,255,.08);border:2px solid rgba(255,255,255,.25);pointer-events:auto;touch-action:none}
-.lv-knob{position:absolute;left:35px;top:35px;width:50px;height:50px;border-radius:50%;background:rgba(255,255,255,.35)}
-.lv-tbtn{position:absolute;right:22px;bottom:210px;display:flex;flex-direction:column;gap:10px;pointer-events:auto}
-.lv-tbtn button{width:64px;height:64px;border-radius:50%;border:2px solid rgba(255,255,255,.3);background:rgba(10,12,20,.6);color:#fff;font-weight:800;font-size:12px}
-.lv-tbtn button:active{background:rgba(255,42,157,.6)}
-.lv-vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse at center,transparent 55%,rgba(255,0,0,.55) 100%);opacity:0;transition:opacity .12s}
-.lv-busted{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(5,5,15,.82);pointer-events:auto}
-.lv-busted h2{font-size:52px;letter-spacing:8px;color:#ff5a5a;margin:0}
-.lv-busted p{font-size:16px}
-.lv-reward{position:absolute;left:50%;top:32%;transform:translateX(-50%);text-align:center;padding:14px 26px;pointer-events:none}
-.lv-reward b{font-size:28px;color:#7dff8a}
-.lv-reward span{display:block;font-size:14px;opacity:.9;margin-top:2px}
-.lv-drift{position:absolute;left:50%;top:58%;transform:translateX(-50%);font-size:22px;font-weight:800;color:#ffd34d;text-shadow:0 2px 6px #000;pointer-events:none}
-.lv-hint{position:absolute;left:50%;bottom:64px;transform:translateX(-50%);padding:7px 14px;font-size:13px;background:rgba(42,111,214,.85);border-radius:8px;white-space:nowrap}
-.lv-district{position:absolute;left:50%;top:16%;transform:translateX(-50%);font-size:30px;font-weight:800;letter-spacing:6px;text-shadow:0 2px 10px #000;pointer-events:none}
-.lv-social{position:absolute;left:10px;top:200px;width:280px;display:flex;flex-direction:column;gap:6px}
-.lv-post{padding:8px 12px;font-size:13px;line-height:1.4}
-.lv-post b{color:#9ecfff}
-`;
-
-function el(tag, cls, parent, html) {
-  const d = document.createElement(tag);
-  if (cls) d.className = cls;
-  if (html !== undefined) d.innerHTML = html;
-  if (parent) parent.appendChild(d);
-  return d;
-}
+const RANK_NAMES = ['NEWCOMER', 'STREET HUSTLER', 'WHEELMAN', 'CREW RUNNER', 'MADE DRIVER', 'LA VEGA LEGEND'];
+const $ = (tag, cls, parent) => {
+  const el = document.createElement(tag);
+  if (cls) el.className = cls;
+  if (parent) parent.appendChild(el);
+  return el;
+};
 
 export class HUD {
   constructor(game) {
     this.game = game;
-    this._dlgQueue = [];
-    this._dlgTimer = 0;
+    this._dialogueQueue = [];
+    this._dialogueIdx = 0;
     this._cardTimer = 0;
+    this._districtTimer = 0;
+    this._lastDistrict = '';
+    this._hintTimer = 0;
+    this._toastTimer = 0;
+    this._posts = [];
     this._mapT = 0;
-    this._lastDistrict = null;
-    this._districtT = 0;
-    this._notifyT = [];
-    this._selectedChar = 'jax';
-    this.root = el('div', null, document.body);
-    this.root.id = 'lv-hud';
-    const style = document.createElement('style');
-    style.textContent = CSS;
-    this.root.appendChild(style);
+    this._build();
+  }
 
+  // -- DOM construction --------------------------------------------------------
+  _build() {
+    const g = this.game;
     // Loading screen.
-    this.loadingEl = el('div', 'lv-loading', this.root);
-    el('h1', null, this.loadingEl, 'LA VEGA');
-    el('div', 'lv-tag', this.loadingEl, 'OPEN WORLD • 12 MISSIONS • TWO LIVES');
-    this.loadBar = el('div', 'lv-loadbar', this.loadingEl);
-    this.loadFill = el('i', null, this.loadBar);
-    this.loadText = el('div', 'lv-loadtext', this.loadingEl, 'Loading…');
+    this.loadingEl = $('div', 'lv-loading', document.body);
+    $('div', 'lv-loading-title', this.loadingEl).textContent = 'LA VEGA';
+    this.loadingSub = $('div', 'lv-loading-sub', this.loadingEl);
+    this.loadingSub.textContent = 'Starting up…';
+    const bar = $('div', 'lv-loading-bar', this.loadingEl);
+    this.loadingFill = $('div', 'lv-loading-fill', bar);
+    this.loadingPct = $('div', 'lv-loading-pct', this.loadingEl);
+    this.loadingPct.textContent = '0%';
+    this.loadingTip = $('div', 'lv-loading-tip', this.loadingEl);
+    this.loadingTip.textContent = 'A living city, smart cops, and four wild biomes beyond the bay.';
 
-    // Main menu.
-    this.menuEl = el('div', 'lv-menu hidden', this.root);
-    el('h1', null, this.menuEl, 'LA VEGA');
-    el('div', 'lv-tag', this.menuEl, 'A STORY OF TWO LIVES • BUILT BY MUSE');
-    const pick = el('div', 'lv-charpick', this.menuEl);
-    this.charJax = el('div', 'lv-char sel', pick, '<b>JAX VEGA</b><span>Fast hands, faster cars</span>');
-    this.charMaya = el('div', 'lv-char', pick, '<b>MAYA VEGA</b><span>Cool head, hot temper</span>');
-    this.charJax.addEventListener('click', () => this._pickChar('jax'));
-    this.charMaya.addEventListener('click', () => this._pickChar('maya'));
-    const btnNew = el('button', 'lv-btn', this.menuEl, '▶ &nbsp;NEW GAME');
-    btnNew.addEventListener('click', () => game.startNewGame(this._selectedChar));
-    const btnContinue = el('button', 'lv-btn ghost', this.menuEl, 'CONTINUE');
-    btnContinue.addEventListener('click', () => game.loadGame(1));
-    const btnTrailer = el('button', 'lv-btn ghost', this.menuEl, '🎬 &nbsp;WATCH TRAILER');
-    btnTrailer.addEventListener('click', () => game.playTrailer());
-    const btnSettings = el('button', 'lv-btn ghost', this.menuEl, '⚙ &nbsp;SETTINGS');
-    btnSettings.addEventListener('click', () => this._toggleSub(this.settingsEl));
-    const btnCredits = el('button', 'lv-btn ghost', this.menuEl, 'CREDITS');
-    btnCredits.addEventListener('click', () => this._toggleSub(this.creditsEl));
+    // Menu (centred column over the live city — one clean stack, no
+    // element can overlap another).
+    this.menuEl = $('div', 'lv-menu hidden', document.body);
+    const inner = $('div', 'lv-menu-inner', this.menuEl);
+    const title = $('div', 'lv-title', inner);
+    title.textContent = 'LA VEGA';
+    const sub = $('div', 'lv-subtitle', inner);
+    sub.textContent = 'A STORY OF TWO LIVES · BUILT BY MUSE';
+    const btns = $('div', 'lv-menu-btns', inner);
+    const mkBtn = (label, primary, fn) => {
+      const b = $('button', 'lv-btn' + (primary ? ' lv-btn-primary' : ''), btns);
+      b.textContent = label;
+      b.addEventListener('click', fn);
+      return b;
+    };
+    mkBtn('▶  NEW GAME', true, () => g.startNewGame(g.selectedChar || 'jax'));
+    mkBtn('↻  LOAD GAME', false, () => this._showLoadSlots());
+    mkBtn('▶  WATCH TRAILER', false, () => g.playTrailer());
+    mkBtn('⚙  SETTINGS', false, () => this.showSettings());
+    mkBtn('★  CREDITS', false, () => this.showCredits());
+    // Character switcher.
+    const charRow = $('div', 'lv-char-row', inner);
+    $('span', 'lv-char-label', charRow).textContent = 'Protagonist:';
+    this.charBtns = {};
+    for (const [id, label, desc] of [['jax', 'JAX VEGA', 'Fast hands, faster cars'], ['maya', 'MAYA VEGA', 'Cool head, hot temper']]) {
+      const b = $('button', 'lv-btn lv-btn-char' + (id === 'jax' ? ' active' : ''), charRow);
+      b.innerHTML = `<b>${label}</b><br><small>${desc}</small>`;
+      b.addEventListener('click', () => {
+        g.selectedChar = id;
+        for (const [k, btn] of Object.entries(this.charBtns)) btn.classList.toggle('active', k === id);
+        if (g.player) { g.player.charId = id; }
+      });
+      this.charBtns[id] = b;
+    }
+    // Save slots.
+    this.loadRow = $('div', 'lv-load-row', inner);
+    this._refreshSlots();
+    const note = $('div', 'lv-menu-note', inner);
+    note.textContent = 'WASD / arrows move · Shift run · Space jump · Q punch · E enter / talk · F shoot · P pause · T phone · V switch character. On Android: left joystick to move, right buttons to drive & fight.';
 
-    // Settings + credits sub-panels (inside the menu).
-    this.settingsEl = el('div', 'lv-panel lv-sub hidden', this.menuEl);
-    el('h2', null, this.settingsEl, 'SETTINGS');
-    this._settingRow(this.settingsEl, 'Sound', 'mute', 'checkbox', settings.get('mute'));
-    this._settingRow(this.settingsEl, 'Music', 'music', 'checkbox', settings.get('music') !== false);
-    this._settingRow(this.settingsEl, 'Sound effects', 'sfx', 'checkbox', settings.get('sfx') !== false);
-    this._settingRow(this.settingsEl, 'Camera shake', 'cameraShake', 'checkbox', settings.get('cameraShake') !== false);
-    this._settingRow(this.settingsEl, 'Show hints', 'showHints', 'checkbox', settings.get('showHints') !== false);
-    this._settingRow(this.settingsEl, 'Sensitivity', 'sensitivity', 'range', settings.get('sensitivity'));
-    this._settingRow(this.settingsEl, 'Quality', 'quality', 'select', settings.get('quality'));
-    const btnCloseSet = el('button', 'lv-btn', this.settingsEl, 'CLOSE');
-    btnCloseSet.addEventListener('click', () => this.settingsEl.classList.add('hidden'));
-    this.creditsEl = el('div', 'lv-panel lv-sub hidden', this.menuEl);
-    el('h2', null, this.creditsEl, 'CREDITS');
-    el('p', null, this.creditsEl, 'LA VEGA — an open-world story game.<br>Built by Muse.<br><br>Starring Jax Vega &amp; Maya Vega.<br>City of La Vega, Neon Row, Marina, South Beach.<br><br>Third-party assets are credited in the repository.<br>All characters and places are fictional.');
-    const btnCloseCred = el('button', 'lv-btn', this.creditsEl, 'CLOSE');
-    btnCloseCred.addEventListener('click', () => this.creditsEl.classList.add('hidden'));
-
-    // Top bar: stats + wanted + clock.
-    const top = el('div', 'lv-topbar', this.root);
-    const stats = el('div', 'lv-panel lv-stats', top);
-    this.moneyEl = el('div', 'lv-money', stats, '$0');
-    this.hpBar = el('div', 'lv-bar lv-hp', stats);
-    this.hpFill = el('i', null, this.hpBar);
-    el('div', 'lv-barlabel', stats, 'HEALTH');
-    this.armorBar = el('div', 'lv-bar lv-armor', stats);
-    this.armorFill = el('i', null, this.armorBar);
-    el('div', 'lv-barlabel', stats, 'ARMOR');
-    const wanted = el('div', 'lv-panel lv-wanted', top);
-    this.starsEl = el('div', 'lv-stars', wanted, '☆☆☆☆☆');
-    el('div', 'lv-barlabel', wanted, 'LVPD HEAT');
-    const clock = el('div', 'lv-panel lv-clock', top);
-    this.clockEl = el('b', null, clock, '12:00');
-    el('br', null, clock);
-    this.weatherEl = el('span', null, clock, 'Clear');
-
-    // Mission panel.
-    this.missionEl = el('div', 'lv-panel lv-mission hidden', this.root);
-    this.missionTitle = el('h3', null, this.missionEl, '');
-    this.missionText = el('p', null, this.missionEl, '');
-
-    // Minimap + weapon readout.
-    this.mapCanvas = el('canvas', 'lv-minimap', this.root);
-    this.mapCanvas.width = 190;
-    this.mapCanvas.height = 190;
-    const weapon = el('div', 'lv-panel lv-weapon', this.root);
-    this.weaponName = el('div', 'lv-wname', weapon, 'FISTS');
-    this.weaponAmmo = el('div', 'lv-wammo', weapon, '∞');
-    const nitro = el('div', 'lv-wnitro', weapon);
-    this.nitroFill = el('i', null, nitro);
-
-    // Prompt, dialogue, mission card, feed, hints, district banner.
-    this.promptEl = el('div', 'lv-prompt hidden', this.root);
-    this.dialogueEl = el('div', 'lv-panel lv-dialogue hidden', this.root);
-    this.dlgWho = el('div', 'lv-who', this.dialogueEl, '');
-    this.dlgLine = el('div', 'lv-line', this.dialogueEl, '');
-    el('div', 'lv-next', this.dialogueEl, 'click / E to continue ▸');
+    // In-game HUD root.
+    this.hudEl = $('div', 'lv-hud', document.body);
+    // Top bar.
+    const top = $('div', 'lv-top', this.hudEl);
+    this.moneyEl = $('span', 'lv-money', top);
+    this.moneyEl.textContent = '$0';
+    this.rankEl = $('span', 'lv-rank', top);
+    this.rankEl.textContent = 'RANK 0 · NEWCOMER';
+    this.missionTopEl = $('span', 'lv-mission-top', top);
+    this.clockEl = $('span', 'lv-clock', top);
+    this.radioEl = $('span', 'lv-radio', top);
+    this.weaponEl = $('span', 'lv-weapon', top);
+    this.collectEl = $('span', 'lv-collect hidden', top);
+    this.qualityPill = $('span', 'lv-quality-pill', top);
+    this.qualityPill.textContent = 'Quality: auto';
+    this.qualityPill.title = 'Tap to change quality';
+    this.qualityPill.addEventListener('click', () => {
+      const order = ['auto', 'high', 'medium', 'low'];
+      const next = order[(order.indexOf(settings.get('quality')) + 1) % order.length];
+      settings.set('quality', next);
+      if (g.applyQuality) g.applyQuality();
+      this.qualityPill.textContent = `Quality: ${next}`;
+      this.notify(`Quality: ${next}.`);
+    });
+    // Wanted stars (top-right, under the top bar).
+    this.starsEl = $('div', 'lv-stars', this.hudEl);
+    // Health / armor / stamina bars (top-left, under the top bar).
+    const bars = $('div', 'lv-bars', this.hudEl);
+    const mkBar = (cls) => {
+      const b = $('div', `lv-bar ${cls}`, bars);
+      const f = $('div', 'lv-fill', b);
+      return f;
+    };
+    this.hpFill = mkBar('lv-bar-hp');
+    this.armorFill = mkBar('lv-bar-armor');
+    this.stamFill = mkBar('lv-bar-stam');
+    // Location label (bottom-left, above the minimap on desktop; the
+    // minimap itself is bottom-right per the recorded layout).
+    this.locEl = $('div', 'lv-loc', this.hudEl);
+    // Minimap (bottom-right, circular).
+    const mapWrap = $('div', 'lv-map-wrap', this.hudEl);
+    this.mapCanvas = $('canvas', 'lv-map', mapWrap);
+    this.mapCanvas.width = 200;
+    this.mapCanvas.height = 200;
+    // Mission panel (left, below the bars).
+    this.missionPanelEl = $('div', 'lv-mission-panel', this.hudEl);
+    // Dispatch board (right, under the stars).
+    this.dispatchEl = $('div', 'lv-dispatch hidden', this.hudEl);
+    // Car HUD (bottom-right, left of the minimap).
+    this.carHudEl = $('div', 'lv-carhud hidden', this.hudEl);
+    // Toasts + social feed.
+    this.toastsEl = $('div', 'lv-toasts', this.hudEl);
+    this.socialEl = $('div', 'lv-social', this.hudEl);
+    // Hint + prompt (bottom-centre).
+    this.hintEl = $('div', 'lv-hint hidden', this.hudEl);
+    this.promptEl = $('div', 'lv-prompt hidden', this.hudEl);
+    // Dialogue box (bottom-centre, above the prompt).
+    this.dialogueEl = $('div', 'lv-dialogue hidden', this.hudEl);
+    this.dialogueNameEl = $('div', 'lv-dialogue-name', this.dialogueEl);
+    this.dialogueTextEl = $('div', 'lv-dialogue-text', this.dialogueEl);
+    const dlgHint = $('div', '', this.dialogueEl);
+    dlgHint.style.cssText = 'text-align:right;color:#8ab;font-size:12px;margin-top:6px';
+    dlgHint.textContent = 'tap / click to continue ▸';
     this.dialogueEl.addEventListener('click', () => this._advanceDialogue());
-    this.cardEl = el('div', 'lv-panel lv-card hidden', this.root);
-    this.cardAct = el('div', 'lv-act', this.cardEl, '');
-    this.cardTitle = el('h2', null, this.cardEl, '');
-    this.cardText = el('p', null, this.cardEl, '');
-    this.feedEl = el('div', 'lv-feed', this.root);
-    this.hintEl = el('div', 'lv-hint hidden', this.root);
-    this.districtEl = el('div', 'lv-district hidden', this.root);
-    this.driftEl = el('div', 'lv-drift hidden', this.root);
-    this.rewardEl = el('div', 'lv-panel lv-reward hidden', this.root);
-    this.rewardMain = el('b', null, this.rewardEl, '');
-    this.rewardSub = el('span', null, this.rewardEl, '');
-    this.socialEl = el('div', 'lv-social', this.root);
-    this.vignetteEl = el('div', 'lv-vignette', this.root);
-
-    // Weapon wheel.
-    this.wheelEl = el('div', 'lv-panel lv-wheel hidden', this.root);
-    // Dealer + garage panels (same row markup; the probe reads
-    // .lv-dealer-title / .lv-dealer-row from both).
-    this.dealerEl = el('div', 'lv-panel lv-shop hidden', this.root);
-    el('div', 'lv-dealer-title', this.dealerEl, 'AUTO PALMS — CARS FOR SALE');
-    el('div', 'lv-dealer-sub', this.dealerEl, 'Click a car to buy it, or press 1 / 2 / 3 for a quick buy.');
-    this.dealerRows = el('div', null, this.dealerEl);
-    const btnCloseDealer = el('button', 'lv-btn lv-close', this.dealerEl, 'Close (E)');
-    btnCloseDealer.addEventListener('click', () => this.hideDealer());
-    this.garageEl = el('div', 'lv-panel lv-shop hidden', this.root);
-    el('div', 'lv-dealer-title', this.garageEl, "MANNY'S GARAGE — your cars");
-    el('div', 'lv-dealer-sub', this.garageEl, 'Your stored cars. Take one out to drive it.');
-    this.garageRows = el('div', null, this.garageEl);
-    const btnCloseGarage = el('button', 'lv-btn lv-close', this.garageEl, 'Close (E)');
-    btnCloseGarage.addEventListener('click', () => this.hideGarage());
-
-    // Phone + pause.
-    this.phoneEl = el('div', 'lv-panel lv-phone hidden', this.root);
-    el('h3', null, this.phoneEl, '📱 Vega Phone');
-    this.phoneTime = el('div', 'lv-ptime', this.phoneEl, '');
-    for (const [icon, name] of [['💬', 'Messages'], ['📇', 'Contacts'], ['📷', 'Camera'], ['🗺️', 'Map'], ['⚙️', 'Settings'], ['🎵', 'Radio']]) {
-      const app = el('div', 'lv-app', this.phoneEl, `${icon}<br>${name}`);
-      app.addEventListener('click', () => this.game.notify ? null : null);
-    }
-    const btnClosePhone = el('button', 'lv-btn ghost', this.phoneEl, 'Close (T)');
-    btnClosePhone.addEventListener('click', () => this.game.togglePhone());
-    this.pauseEl = el('div', 'lv-panel lv-pause hidden', this.root);
-    el('h2', null, this.pauseEl, 'PAUSED');
-    const btnResume = el('button', 'lv-btn', this.pauseEl, 'RESUME');
-    btnResume.addEventListener('click', () => this.game.togglePause());
-    const btnPauseSet = el('button', 'lv-btn ghost', this.pauseEl, 'SETTINGS');
-    btnPauseSet.addEventListener('click', () => { this.game.togglePause(); this.showMenu(); });
-    const btnQuit = el('button', 'lv-btn ghost', this.pauseEl, 'QUIT TO MENU');
-    btnQuit.addEventListener('click', () => this.game.quitToMenu());
-
+    // Mission card (centred, upper third).
+    this.cardEl = $('div', 'lv-card hidden', this.hudEl);
+    this.cardActEl = $('div', 'lv-card-act', this.cardEl);
+    this.cardTitleEl = $('div', 'lv-card-title', this.cardEl);
+    this.cardTextEl = $('div', 'lv-card-text', this.cardEl);
+    this.cardEl.addEventListener('click', () => this._hideCard());
+    // District banner (own element, inline styles, short-lived).
+    this.districtEl = $('div', '', this.hudEl);
+    this.districtEl.style.cssText = 'position:absolute;top:17%;left:50%;transform:translateX(-50%);text-align:center;pointer-events:none;z-index:15;display:none';
+    this.districtNameEl = $('div', '', this.districtEl);
+    this.districtNameEl.style.cssText = 'font-size:44px;font-weight:900;letter-spacing:6px;color:#ffd34d;text-shadow:0 2px 0 #ff2a9d,0 4px 14px rgba(0,0,0,.8)';
+    this.districtSubEl = $('div', '', this.districtEl);
+    this.districtSubEl.style.cssText = 'font-size:14px;color:#fff;text-shadow:0 1px 3px #000';
+    // Reward / drift popups.
+    this.rewardEl = $('div', 'lv-reward hidden', this.hudEl);
+    this.driftEl = $('div', 'lv-drift hidden', this.hudEl);
+    // Damage flash + crosshair.
+    this.flashEl = $('div', 'lv-flash', this.hudEl);
+    this.crosshairEl = $('div', 'lv-crosshair hidden', this.hudEl);
+    this.crosshairEl.textContent = '+';
     // Busted overlay.
-    this.bustedEl = el('div', 'lv-busted hidden', this.root);
-    el('h2', null, this.bustedEl, 'BUSTED');
-    this.bustedText = el('p', null, this.bustedEl, '');
-    const btnBusted = el('button', 'lv-btn', this.bustedEl, 'CONTINUE');
-    btnBusted.addEventListener('click', () => this.bustedEl.classList.add('hidden'));
-
-    // Touch controls (shown on touch devices; hidden during cutscenes).
-    this.touchEl = el('div', 'lv-touch hidden', this.root);
-    const stick = el('div', 'lv-stick', this.touchEl);
-    this.stickKnob = el('div', 'lv-knob', stick);
-    const tbtns = el('div', 'lv-tbtn', this.touchEl);
-    this._touchBtn(tbtns, 'FIRE', 'fire');
-    this._touchBtn(tbtns, 'JUMP', 'jump');
-    this._touchBtn(tbtns, 'ENTER', 'enter');
-    this._touchBtn(tbtns, 'PUNCH', 'punch');
-    if ('ontouchstart' in window) this.touchEl.classList.remove('hidden');
+    this.bustedEl = $('div', 'lv-busted hidden', this.hudEl);
+    $('div', 'lv-busted-title', this.bustedEl).textContent = 'BUSTED';
+    this.bustedTextEl = $('div', 'lv-busted-text', this.bustedEl);
+    $('div', 'lv-busted-sub', this.bustedEl).textContent = 'The LVPD has you. (tap to continue)';
+    this.bustedEl.addEventListener('click', () => this.bustedEl.classList.add('hidden'));
+    // Keyboard help (PC only — CSS hides it in touch mode).
+    this.helpEl = $('div', 'lv-help', this.hudEl);
+    this.helpEl.innerHTML = 'WASD move / drive · Shift run<br>Space jump / handbrake · Q punch · F shoot<br>E enter car / talk · T phone · H horn<br>N nitro · R radio · Tab weapon wheel (1-5 pick)<br>B buy (garage / shop) · P pause · M mute';
+    // Phone button.
+    this.phoneBtn = $('button', 'lv-phone-btn', this.hudEl);
+    this.phoneBtn.textContent = '📱';
+    this.phoneBtn.addEventListener('click', () => g.togglePhone());
+    // Touch controls.
+    this.touchEl = $('div', 'lv-touch', this.hudEl);
+    const stick = $('div', 'lv-stick', this.touchEl);
+    this.stickKnob = $('div', 'lv-stick-knob', stick);
     this._bindStick(stick);
-
-    this.updateMoney();
-    this.updateWeapon();
-    this.updateCharacter();
-  }
-
-  _pickChar(id) {
-    this._selectedChar = id;
-    this.charJax.classList.toggle('sel', id === 'jax');
-    this.charMaya.classList.toggle('sel', id === 'maya');
-    if (this.game) this.game.selectedChar = id;
-  }
-
-  _toggleSub(panelEl) {
-    const other = panelEl === this.settingsEl ? this.creditsEl : this.settingsEl;
-    other.classList.add('hidden');
-    panelEl.classList.toggle('hidden');
-  }
-
-  _settingRow(parent, label, key, type, value) {
-    const row = el('label', null, parent, label);
-    let input;
-    if (type === 'checkbox') {
-      input = document.createElement('input');
-      input.type = 'checkbox';
-      input.checked = !!value;
-      input.addEventListener('change', () => { settings.set(key, input.checked); this.game.audio && this.game.audio.setMuted(settings.get('mute')); });
-    } else if (type === 'range') {
-      input = document.createElement('input');
-      input.type = 'range'; input.min = 0.5; input.max = 2; input.step = 0.5; input.value = value;
-      input.addEventListener('change', () => settings.set(key, Number(input.value)));
-    } else {
-      input = document.createElement('select');
-      for (const opt of ['auto', 'high', 'medium', 'low']) {
-        const o = document.createElement('option');
-        o.value = opt; o.textContent = opt;
-        if (opt === value) o.selected = true;
-        input.appendChild(o);
-      }
-      input.addEventListener('change', () => settings.set(key, input.value));
+    const btnsWrap = $('div', 'lv-touch-btns', this.touchEl);
+    const tbtn = (label, key) => {
+      const b = $('button', 'lv-tbtn', btnsWrap);
+      b.textContent = label;
+      const on = (e) => { e.preventDefault(); g.input.touch[key] = true; };
+      const off = (e) => { e.preventDefault(); g.input.touch[key] = false; };
+      b.addEventListener('touchstart', on, { passive: false });
+      b.addEventListener('touchend', off, { passive: false });
+      b.addEventListener('mousedown', on);
+      b.addEventListener('mouseup', off);
+      return b;
+    };
+    tbtn('FIRE', 'fire');
+    tbtn('JUMP', 'jump');
+    tbtn('ENTER', 'enter');
+    tbtn('PUNCH', 'punch');
+    tbtn('AIM', 'aim');
+    // Weapon wheel.
+    this.wheelEl = $('div', 'lv-wheel hidden', this.hudEl);
+    $('div', 'lv-wheel-title', this.wheelEl).textContent = 'WEAPONS';
+    this.wheelSlotsEl = $('div', '', this.wheelEl);
+    const wheelItems = $('div', 'lv-wheel-items', this.wheelEl);
+    const mkItem = (label, fn) => {
+      const b = $('button', 'lv-wheel-item', wheelItems);
+      b.textContent = label;
+      b.addEventListener('click', fn);
+      return b;
+    };
+    mkItem('🍔 Snack (+25 HP)', () => {
+      const p = g.player;
+      if ((g.items?.snack || 0) > 0 && p.health < 100) { g.items.snack--; p.heal(25); this.notify('Snack — +25 HP.'); this.updateWeapon(); }
+      else this.notify('No snacks left.');
+    });
+    mkItem('🛡 Armor ($150)', () => {
+      const p = g.player;
+      if (p.money >= 150 && p.armor < 100) { p.money -= 150; p.armor = 100; this.notify('Armor fitted — 100%.'); this.updateWeapon(); }
+      else this.notify('Need $150 for armor.');
+    });
+    // Dealer panel (Auto Palms).
+    this.dealerEl = $('div', 'lv-dealer hidden', this.hudEl);
+    $('div', 'lv-dealer-title', this.dealerEl).textContent = 'AUTO PALMS — BUY A CAR';
+    this.dealerRowsEl = $('div', '', this.dealerEl);
+    const dClose = $('button', 'lv-btn', this.dealerEl);
+    dClose.textContent = 'CLOSE  (B / Esc)';
+    dClose.addEventListener('click', () => this.hideDealer());
+    // Garage panel (Manny's).
+    this.garageEl = $('div', 'lv-dealer hidden', this.hudEl);
+    $('div', 'lv-dealer-title', this.garageEl).textContent = "MANNY'S GARAGE";
+    this.garageRowsEl = $('div', '', this.garageEl);
+    const gClose = $('button', 'lv-btn', this.garageEl);
+    gClose.textContent = 'CLOSE  (B / Esc)';
+    gClose.addEventListener('click', () => this.hideGarage());
+    // Pause panel.
+    this.pauseEl = $('div', 'lv-pause hidden', this.hudEl);
+    $('div', 'lv-pause-title', this.pauseEl).textContent = 'PAUSED';
+    this.pauseStatsEl = $('div', 'lv-pause-stats', this.pauseEl);
+    const pBtn = (label, fn) => {
+      const b = $('button', 'lv-btn', this.pauseEl);
+      b.textContent = label;
+      b.addEventListener('click', fn);
+      return b;
+    };
+    pBtn('▶  RESUME', () => g.togglePause());
+    pBtn('⚙  SETTINGS', () => this.showSettings());
+    pBtn('💾  SAVE GAME', () => { g.saveGame(false, 1); });
+    pBtn('🏠  QUIT TO MENU', () => g.quitToMenu());
+    // Settings panel.
+    this.settingsEl = $('div', 'lv-settings hidden', this.hudEl);
+    $('div', 'lv-settings-title', this.settingsEl).textContent = 'SETTINGS';
+    this.settingsRowsEl = $('div', '', this.settingsEl);
+    this._buildSettings();
+    const sBack = $('button', 'lv-btn', this.settingsEl);
+    sBack.textContent = '←  BACK';
+    sBack.addEventListener('click', () => {
+      this.settingsEl.classList.add('hidden');
+      if (g.state === 'playing' && g.paused) this.pauseEl.classList.remove('hidden');
+      else if (g.state === 'menu') this.menuEl.classList.remove('hidden');
+      this._refreshLayers();
+    });
+    // Credits panel.
+    this.creditsEl = $('div', 'lv-credits hidden', this.hudEl);
+    $('div', 'lv-credits-title', this.creditsEl).textContent = 'CREDITS';
+    const cBody = $('div', 'lv-credits-body', this.creditsEl);
+    cBody.innerHTML = '<b>LA VEGA</b> — an open-world story of two lives.<br><br>Built by Muse.<br><br>Story, code, art and audio are original or procedural.<br><br><b>Attribution (CC-BY / CC0):</b><br>· Character, car and weapon models: Quaternius (CC0, via Poly Pizza).<br>· Engine: Three.js (MIT).<br>· Voice barks: CC0 clips (Freesound / OpenGameArt / Sonniss) when present, otherwise synthesized mumbles.<br><br>No copyrighted music, models or textures are used.';
+    const cBack = $('button', 'lv-btn', this.creditsEl);
+    cBack.textContent = '←  BACK';
+    cBack.addEventListener('click', () => {
+      this.creditsEl.classList.add('hidden');
+      this.menuEl.classList.remove('hidden');
+      this._refreshLayers();
+    });
+    // Phone panel.
+    this.phoneEl = $('div', 'lv-phone hidden', this.hudEl);
+    $('div', 'lv-phone-title', this.phoneEl).textContent = '📱  LA VEGA PHONE';
+    const tabs = $('div', 'lv-phone-tabs', this.phoneEl);
+    this.phoneBodyEl = $('div', '', this.phoneEl);
+    for (const [tab, label] of [['contacts', 'Contacts'], ['social', 'Social'], ['gps', 'GPS']]) {
+      const b = $('button', 'lv-phone-tab' + (tab === 'contacts' ? ' active' : ''), tabs);
+      b.textContent = label;
+      b.addEventListener('click', () => {
+        for (const t of tabs.children) t.classList.remove('active');
+        b.classList.add('active');
+        this._renderPhone(tab);
+      });
     }
-    row.appendChild(input);
-    return row;
+    this._refreshLayers();
   }
 
-  _touchBtn(parent, label, action) {
-    const b = el('button', null, parent, label);
-    const down = (e) => { e.preventDefault(); this.game.input.touch[action] = true; };
-    const up = (e) => { e.preventDefault(); this.game.input.touch[action] = false; };
-    b.addEventListener('touchstart', down, { passive: false });
-    b.addEventListener('touchend', up);
-    b.addEventListener('mousedown', down);
-    b.addEventListener('mouseup', up);
-    return b;
+  _buildSettings() {
+    const g = this.game;
+    const row = (label, control) => {
+      const r = $('div', 'lv-settings-row', this.settingsRowsEl);
+      const l = $('span', '', r);
+      l.textContent = label;
+      r.appendChild(control);
+      return r;
+    };
+    const sel = (key, options) => {
+      const s = $('select', 'lv-select');
+      for (const [v, label] of options) {
+        const o = document.createElement('option');
+        o.value = v;
+        o.textContent = label;
+        if (String(settings.get(key)) === String(v)) o.selected = true;
+        s.appendChild(o);
+      }
+      s.addEventListener('change', () => {
+        settings.set(key, s.value);
+        if (key === 'quality' && g.applyQuality) g.applyQuality();
+        if (key === 'mute' && g.audio) g.audio.setMuted(settings.get('mute'));
+        this._refreshLayers();
+      });
+      return s;
+    };
+    row('Music', sel('music', [['true', 'On'], ['false', 'Off']]));
+    row('Sound effects', sel('sfx', [['true', 'On'], ['false', 'Off']]));
+    row('Mute all', sel('mute', [['false', 'Off'], ['true', 'On']]));
+    row('Quality', sel('quality', [['auto', 'Auto'], ['high', 'High'], ['medium', 'Medium'], ['low', 'Low']]));
+    row('Controls', sel('controlMode', [['auto', 'Auto'], ['touch', 'Touch'], ['pc', 'Keyboard']]));
+    row('Camera sensitivity', sel('sensitivity', [['0.5', '0.5×'], ['1', '1×'], ['1.5', '1.5×'], ['2', '2×']]));
+    row('Camera shake', sel('cameraShake', [['true', 'On'], ['false', 'Off']]));
+    row('Hints', sel('showHints', [['true', 'On'], ['false', 'Off']]));
+    const resetBtn = $('button', 'lv-btn', this.settingsRowsEl);
+    resetBtn.textContent = 'RESET SAVE (all slots)';
+    resetBtn.addEventListener('click', () => {
+      if (g.saves) for (const s of [1, 2, 3]) g.saves.deleteSlot(s);
+      settings.reset();
+      this.notify('Saves + settings reset.');
+      this._refreshSlots();
+    });
   }
 
+  // -- touch joystick ------------------------------------------------------------
   _bindStick(stick) {
-    const t = this.game.input.touch;
+    const g = this.game;
     let active = null;
-    const move = (e) => {
+    const setFromEvent = (e) => {
       const r = stick.getBoundingClientRect();
       const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-      const dx = clamp((e.clientX - cx) / 45, -1, 1);
-      const dz = clamp((e.clientY - cy) / 45, -1, 1);
-      this.stickKnob.style.left = `${35 + dx * 32}px`;
-      this.stickKnob.style.top = `${35 + dz * 32}px`;
-      t.mx = dx; t.mz = dz;
-      t.gas = dz < -0.3; t.brake = dz > 0.3;
+      const dx = (e.clientX - cx) / (r.width / 2);
+      const dy = (e.clientY - cy) / (r.height / 2);
+      const len = Math.hypot(dx, dy);
+      const cl = len > 1 ? 1 / len : 1;
+      g.input.touch.mx = dx * cl;
+      g.input.touch.mz = dy * cl;
+      this.stickKnob.style.transform = `translate(${dx * cl * 34}px, ${dy * cl * 34}px)`;
     };
-    const end = () => {
+    const reset = () => {
       active = null;
-      this.stickKnob.style.left = '35px';
-      this.stickKnob.style.top = '35px';
-      t.mx = 0; t.mz = 0; t.gas = false; t.brake = false;
+      g.input.touch.mx = 0;
+      g.input.touch.mz = 0;
+      this.stickKnob.style.transform = '';
     };
-    stick.addEventListener('touchstart', (e) => { active = e.changedTouches[0].identifier; move(e.changedTouches[0]); }, { passive: true });
-    stick.addEventListener('touchmove', (e) => { for (const c of e.changedTouches) if (c.identifier === active) move(c); }, { passive: true });
-    stick.addEventListener('touchend', end);
-    stick.addEventListener('mousedown', (e) => { active = 'mouse'; move(e); });
-    window.addEventListener('mousemove', (e) => { if (active === 'mouse') move(e); });
-    window.addEventListener('mouseup', end);
+    stick.addEventListener('touchstart', (e) => { e.preventDefault(); active = e.changedTouches[0].identifier; setFromEvent(e.changedTouches[0]); }, { passive: false });
+    stick.addEventListener('touchmove', (e) => {
+      e.preventDefault();
+      for (const t of e.changedTouches) if (t.identifier === active) setFromEvent(t);
+    }, { passive: false });
+    stick.addEventListener('touchend', (e) => { for (const t of e.changedTouches) if (t.identifier === active) reset(); }, { passive: false });
+    stick.addEventListener('mousedown', (e) => { active = 'mouse'; setFromEvent(e); });
+    window.addEventListener('mousemove', (e) => { if (active === 'mouse') setFromEvent(e); });
+    window.addEventListener('mouseup', () => { if (active === 'mouse') reset(); });
   }
 
-  // -- loading / menu ----------------------------------------------------------
+  // -- layer manager: ONE place decides what can be seen ----------------------
+  // Rules: menu open → hide everything in-game. Card or dialogue open →
+  // hide touch, mission panel, prompt, hint, dispatch, toasts, social and
+  // the district banner. Cutscene / trailer / pause / phone / dealer /
+  // garage / wheel / busted → hide touch + prompt. Nothing overlaps.
+  _refreshLayers() {
+    const g = this.game;
+    const menuOpen = !this.menuEl.classList.contains('hidden');
+    const cardOpen = !this.cardEl.classList.contains('hidden');
+    const dlgOpen = !this.dialogueEl.classList.contains('hidden');
+    const modalOpen = cardOpen || dlgOpen
+      || !this.dealerEl.classList.contains('hidden')
+      || !this.garageEl.classList.contains('hidden')
+      || !this.wheelEl.classList.contains('hidden')
+      || !this.pauseEl.classList.contains('hidden')
+      || !this.phoneEl.classList.contains('hidden')
+      || !this.bustedEl.classList.contains('hidden');
+    const cutscene = (g.cutsceneT || 0) > 0 || g.state === 'trailer';
+    const touchMode = effectiveControlMode() === 'touch';
+    document.body.classList.toggle('lv-touch-mode', touchMode);
+    document.body.classList.toggle('lv-pc-mode', !touchMode);
+    // Touch controls: only in touch mode, in-game, no modal, no cutscene.
+    this.touchEl.style.display = (!menuOpen && !modalOpen && !cutscene && touchMode && g.state === 'playing') ? '' : 'none';
+    // Mission panel: hidden under a card or dialogue (they say the same
+    // thing) and under the menu.
+    this.missionPanelEl.style.display = (!menuOpen && !cardOpen && !dlgOpen) ? '' : 'none';
+    // Prompt + hint: hidden under any modal or the menu.
+    this.promptEl.style.display = (!menuOpen && !modalOpen) ? '' : 'none';
+    this.hintEl.style.display = (!menuOpen && !modalOpen && settings.get('showHints')) ? '' : 'none';
+    // Dispatch / toasts / social: hidden under card, dialogue, menu.
+    this.dispatchEl.style.display = (!menuOpen && !cardOpen && !dlgOpen) ? '' : 'none';
+    this.toastsEl.style.display = (!menuOpen && !cardOpen && !dlgOpen) ? '' : 'none';
+    this.socialEl.style.display = (!menuOpen && !cardOpen && !dlgOpen) ? '' : 'none';
+    // Phone button: in-game only.
+    this.phoneBtn.style.display = (!menuOpen && !modalOpen && g.state === 'playing') ? '' : 'none';
+    // District banner: never under a card, dialogue, cutscene or menu.
+    if (menuOpen || cardOpen || dlgOpen || cutscene) this.districtEl.style.display = 'none';
+    else if (this._districtTimer > 0) this.districtEl.style.display = '';
+    // Top bar / bars / location / minimap: in-game only.
+    const inGame = !menuOpen && (g.state === 'playing' || g.state === 'trailer');
+    this.hudEl.style.visibility = menuOpen ? 'hidden' : '';
+    void inGame;
+  }
+
+  // -- loading -------------------------------------------------------------------
   setLoading(pct, text) {
-    this.loadingEl.classList.remove('hidden');
-    this.loadFill.style.width = `${clamp(pct, 0, 100)}%`;
-    if (text) this.loadText.textContent = text;
+    this.loadingFill.style.width = `${pct}%`;
+    this.loadingPct.textContent = `${Math.round(pct)}%`;
+    if (text) this.loadingSub.textContent = text;
   }
-
   hideLoading() {
-    this.loadingEl.classList.add('hidden');
+    this.loadingEl.classList.add('lv-fade');
+    setTimeout(() => this.loadingEl.classList.add('hidden'), 600);
   }
 
+  // -- menu ----------------------------------------------------------------------
+  _refreshSlots() {
+    this.loadRow.innerHTML = '';
+    const g = this.game;
+    const slots = g.saves ? g.saves.listSlots() : [];
+    for (const { slot, info } of slots) {
+      const b = $('button', 'lv-btn lv-btn-small', this.loadRow);
+      b.textContent = info
+        ? `SLOT ${slot} · $${(info.money || 0).toLocaleString()} · ${info.charId === 'maya' ? 'Maya' : 'Jax'} · job ${info.mission || 0}`
+        : `SLOT ${slot} · empty`;
+      b.addEventListener('click', () => { if (info) g.loadGame(slot); else this.notify(`Slot ${slot} is empty.`); });
+    }
+  }
+  _showLoadSlots() {
+    this._refreshSlots();
+    this.loadRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    this.notify('Pick a slot to load.');
+  }
   showMenu() {
-    this.menuEl.classList.remove('hidden');
-    this.pauseEl.classList.add('hidden');
-    this.phoneEl.classList.add('hidden');
+    // THE FIX: the menu never shows over a stale card, dialogue, panel or
+    // touch control — hide all of them first.
+    this._hideCard();
+    this._hideDialogue();
     this.hideDealer();
     this.hideGarage();
     this.hideWheel();
+    this.showPause(false);
+    this.showPhone(false);
+    this.bustedEl.classList.add('hidden');
+    this.districtEl.style.display = 'none';
+    this._districtTimer = 0;
+    this._refreshSlots();
+    this.menuEl.classList.remove('hidden');
+    this._refreshLayers();
   }
-
   hideMenu() {
     this.menuEl.classList.add('hidden');
-    this.settingsEl.classList.add('hidden');
-    this.creditsEl.classList.add('hidden');
+    this._refreshLayers();
   }
 
-  // -- per-frame ----------------------------------------------------------------
-  update(dt) {
-    const g = this.game;
-    const p = g.player;
-    if (!p) return;
-    this.updateMoney();
-    // Health / armor bars + wanted stars + clock.
-    this.hpFill.style.width = `${clamp(p.health || 0, 0, 100)}%`;
-    this.armorFill.style.width = `${clamp(p.armor || 0, 0, 100)}%`;
-    const wanted = g.police ? g.police.wanted : 0;
-    let stars = '';
-    for (let i = 0; i < 5; i++) stars += i < wanted ? '★' : '<span class="off">☆</span>';
-    this.starsEl.innerHTML = stars;
-    if (g.weather) {
-      const h = g.weather.hour || 12;
-      const hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
-      this.clockEl.textContent = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-      this.weatherEl.textContent = g.weather.isNight && g.weather.isNight() ? 'Night' : (g.weather.name || 'Clear');
-    }
-    // Nitro bar + weapon label refresh (cheap, keeps ammo always current).
-    const car = g.vehicles ? (g.vehicles.playerCar || g.vehicles.playerBoat || g.vehicles.playerHeli) : null;
-    this.nitroFill.style.width = `${car ? clamp(car.nitro || 0, 0, 100) : 0}%`;
-    this.updateWeapon();
-    // Dialogue auto-advance + mission card timer.
-    if (this._dlgTimer > 0) {
-      this._dlgTimer -= dt;
-      if (this._dlgTimer <= 0) this._advanceDialogue();
-    }
-    if (this._cardTimer > 0) {
-      this._cardTimer -= dt;
-      if (this._cardTimer <= 0) this.cardEl.classList.add('hidden');
-    }
-    // District banner on change — never while the mission card is up or a
-    // cutscene is running: both are centred and their titles jumble into
-    // one unreadable mess (round 6 fix).
-    const suppressBanner = !this.cardEl.classList.contains('hidden') || !!(g.cutsceneT > 0);
-    const d = this.districtName();
-    if (d !== this._lastDistrict) {
-      this._lastDistrict = d;
-      this.districtEl.textContent = d;
-      if (!suppressBanner) {
-        this.districtEl.classList.remove('hidden');
-        this._districtT = 2.5;
-      }
-    }
-    if (this._districtT > 0) {
-      this._districtT -= dt;
-      if (this._districtT <= 0) this.districtEl.classList.add('hidden');
-    }
-    if (suppressBanner) this.districtEl.classList.add('hidden');
-    // Touch controls hide during cutscenes (round 3 fix) — enforced every
-    // frame, not gated on touch detection, so a control forced visible by
-    // any path is re-hidden while the cutscene runs and returns after it
-    // ends (round 6 fix).
-    if (this.touchEl) {
-      const showTouch = ('ontouchstart' in window) && !(g.cutsceneT > 0);
-      this.touchEl.classList.toggle('hidden', !showTouch);
-    }
-    // Minimap, throttled.
-    this._mapT -= dt;
-    if (this._mapT <= 0) {
-      this._mapT = 0.15;
-      this._drawMinimap();
-    }
+  // -- mission card + dialogue ------------------------------------------------------
+  showMissionCard(act, title, text) {
+    this._hideDialogue();
+    this.cardActEl.textContent = act || '';
+    this.cardTitleEl.textContent = title || '';
+    this.cardTextEl.textContent = text || '';
+    this.cardEl.classList.remove('hidden');
+    this.cardEl.classList.remove('lv-fade');
+    this._cardTimer = 5;
+    this._refreshLayers();
+  }
+  _hideCard() {
+    if (this.cardEl.classList.contains('hidden')) return;
+    this.cardEl.classList.add('hidden');
+    this._cardTimer = 0;
+    this._refreshLayers();
+  }
+  showDialogue(name, text) {
+    this.showDialogueSequence([{ who: name, text }]);
+  }
+  showDialogueSequence(lines) {
+    if (!lines || !lines.length) return;
+    // The card steps aside: a card and a dialogue never share the screen.
+    this._hideCard();
+    this._dialogueQueue = lines.slice();
+    this._dialogueIdx = 0;
+    this._showDialogueLine();
+    this._refreshLayers();
+  }
+  _showDialogueLine() {
+    const line = this._dialogueQueue[this._dialogueIdx];
+    if (!line) { this._hideDialogue(); return; }
+    this.dialogueNameEl.textContent = (line.who || '???').toUpperCase();
+    this.dialogueTextEl.textContent = line.text || '';
+    this.dialogueEl.classList.remove('hidden');
+    this._refreshLayers();
+  }
+  _advanceDialogue() {
+    this._dialogueIdx++;
+    if (this._dialogueIdx >= this._dialogueQueue.length) this._hideDialogue();
+    else this._showDialogueLine();
+  }
+  _hideDialogue() {
+    if (this.dialogueEl.classList.contains('hidden') && !this._dialogueQueue.length) return;
+    this.dialogueEl.classList.add('hidden');
+    this._dialogueQueue = [];
+    this._dialogueIdx = 0;
+    this._refreshLayers();
   }
 
-  updateMissionPanel() {
-    const g = this.game;
-    const m = g.missions ? g.missions.current : null;
-    if (m) {
-      const step = g.missions.step;
-      this.missionTitle.textContent = m.name || 'JOB';
-      this.missionText.textContent = step ? step.text : '';
-      this.missionEl.classList.remove('hidden');
-    } else {
-      this.missionTitle.textContent = 'LA VEGA';
-      this.missionText.textContent = 'Free roam — find work at the club.';
-      this.missionEl.classList.remove('hidden');
-    }
-  }
-
-  // -- toasts / prompts / hints ---------------------------------------------------
+  // -- toasts / social / hints / prompts ---------------------------------------------
   notify(text) {
-    const t = el('div', 'lv-panel lv-toast', this.feedEl, text);
-    this._notifyT.push(t);
-    if (this._notifyT.length > 5) this._notifyT.shift().remove();
-    setTimeout(() => { t.remove(); const i = this._notifyT.indexOf(t); if (i >= 0) this._notifyT.splice(i, 1); }, 4500);
+    if (!text) return;
+    const t = $('div', 'lv-toast', this.toastsEl);
+    t.textContent = text;
+    setTimeout(() => { t.style.opacity = '0'; }, 3400);
+    setTimeout(() => t.remove(), 4100);
+    while (this.toastsEl.children.length > 3) this.toastsEl.firstChild.remove();
   }
-
+  socialPost(text) {
+    const p = $('div', 'lv-social-post', this.socialEl);
+    p.textContent = text;
+    this._posts.unshift(text);
+    if (this._posts.length > 6) this._posts.pop();
+    setTimeout(() => { p.style.opacity = '0'; }, 5200);
+    setTimeout(() => p.remove(), 5900);
+    while (this.socialEl.children.length > 3) this.socialEl.firstChild.remove();
+  }
+  hint(text) {
+    if (!text) return;
+    this.hintEl.textContent = text;
+    this.hintEl.classList.remove('hidden');
+    this._hintTimer = 4;
+    this._refreshLayers();
+  }
   showPrompt(text) {
-    this.promptEl.textContent = text;
+    this.promptEl.textContent = text || '';
     this.promptEl.classList.remove('hidden');
   }
-
   hidePrompt() {
     this.promptEl.classList.add('hidden');
   }
-
-  hint(text) {
-    this.hintEl.textContent = text;
-    this.hintEl.classList.remove('hidden');
-    clearTimeout(this._hintTO);
-    this._hintTO = setTimeout(() => this.hintEl.classList.add('hidden'), 4000);
+  showReward(text, sub) {
+    this.rewardEl.textContent = text || '';
+    this.rewardEl.classList.remove('hidden');
+    if (sub) this.notify(sub);
+    setTimeout(() => this.rewardEl.classList.add('hidden'), 3000);
+  }
+  showDrift(score) {
+    this.driftEl.textContent = `DRIFT +$${score}`;
+    this.driftEl.classList.remove('hidden');
+    setTimeout(() => this.driftEl.classList.add('hidden'), 1500);
+  }
+  showBusted(paid) {
+    this.bustedTextEl.textContent = paid
+      ? `Bail paid — $${paid}. You wake up at La Vega General.`
+      : 'The LVPD has you. You wake up at La Vega General.';
+    this.bustedEl.classList.remove('hidden');
+    this._refreshLayers();
+    setTimeout(() => { this.bustedEl.classList.add('hidden'); this._refreshLayers(); }, 3500);
+  }
+  flashWanted() {
+    this.starsEl.classList.add('lv-blink');
+    setTimeout(() => this.starsEl.classList.remove('lv-blink'), 1200);
+  }
+  flashDamage() {
+    this.flashEl.style.opacity = '1';
+    setTimeout(() => { this.flashEl.style.opacity = '0'; }, 180);
   }
 
-  // -- dialogue / mission card -----------------------------------------------------
-  showDialogue(who, text) {
-    this._dlgQueue = [{ who, text }];
-    this._showDlgHead();
-  }
-
-  showDialogueSequence(arr) {
-    this._dlgQueue = (arr || []).slice();
-    this._showDlgHead();
-  }
-
-  _showDlgHead() {
-    const head = this._dlgQueue[0];
-    if (!head) { this.dialogueEl.classList.add('hidden'); return; }
-    this.dlgWho.textContent = head.who || '';
-    this.dlgLine.textContent = head.text || '';
-    this.dialogueEl.classList.remove('hidden');
-    this._dlgTimer = 5;
-  }
-
-  _advanceDialogue() {
-    this._dlgQueue.shift();
-    this._dlgTimer = 0;
-    if (this._dlgQueue.length) this._showDlgHead();
-    else this.dialogueEl.classList.add('hidden');
-  }
-
-  showMissionCard(act, title, text) {
-    this.cardAct.textContent = act || '';
-    this.cardTitle.textContent = title || '';
-    this.cardText.textContent = text || '';
-    this.cardEl.classList.remove('hidden');
-    this._cardTimer = 5;
-  }
-
-  // -- weapon wheel ---------------------------------------------------------------
-  showWheel(show) {
-    if (show) {
-      const p = this.game.player;
-      this.wheelEl.innerHTML = '';
-      for (const id of WEAPON_ORDER) {
-        const w = WEAPONS[id];
-        const owned = p.weapons && p.weapons[id];
-        const slot = el('div', `lv-wheel-slot${owned ? ' owned' : ' locked'}${p.weapon === id ? ' sel' : ''}`, this.wheelEl);
-        const ammo = id === 'fists' ? '∞' : (owned ? `${p.weapon === id ? p.magAmmo : w.mag} / ${owned.ammo}` : `$${w.price}`);
-        slot.innerHTML = `<div class="lv-sname">${w.name}</div><div class="lv-sammo">${ammo}</div>`;
-        slot.addEventListener('click', () => {
-          if (owned) { p.setWeapon(id); this.hideWheel(); }
-          else this.notify(`Buy the ${w.name} at Vega Arms ($${w.price}).`);
-        });
-      }
-      this.wheelEl.classList.remove('hidden');
-    } else {
-      this.hideWheel();
-    }
-  }
-
-  hideWheel() {
-    this.wheelEl.classList.add('hidden');
-  }
-
-  // -- dealer + garage --------------------------------------------------------------
+  // -- dealer / garage / wheel ---------------------------------------------------------
   showDealer() {
-    this.dealerRows.innerHTML = '';
+    const g = this.game;
+    this.dealerRowsEl.innerHTML = '';
     for (const key of CAR_CATALOG) {
       const m = CAR_MODELS[key];
       if (!m) continue;
-      const row = el('div', 'lv-dealer-row', this.dealerRows);
-      row.innerHTML = `<span>${m.name}</span><span class="lv-price">$${m.price.toLocaleString()}</span>`;
-      row.addEventListener('click', () => this.game.buyCar(key));
+      const row = $('div', 'lv-dealer-row', this.dealerRowsEl);
+      const name = $('span', '', row);
+      name.textContent = `${m.name} — top ${m.top} m/s`;
+      const price = $('b', '', row);
+      price.textContent = `$${m.price.toLocaleString()}`;
+      row.style.cursor = 'pointer';
+      row.addEventListener('click', () => g.buyCar(key));
     }
     this.dealerEl.classList.remove('hidden');
+    this._refreshLayers();
   }
-
   hideDealer() {
     this.dealerEl.classList.add('hidden');
+    this._refreshLayers();
   }
-
   showGarage() {
-    this.garageRows.innerHTML = '';
-    const owned = this.game.ownedCars || [];
-    if (!owned.length) {
-      el('div', 'lv-dealer-row', this.garageRows, '<span>No cars stored yet.</span>');
+    const g = this.game;
+    this.garageRowsEl.innerHTML = '';
+    const cars = g.ownedCars || [];
+    if (!cars.length) {
+      const row = $('div', 'lv-dealer-row', this.garageRowsEl);
+      row.textContent = 'No cars stored yet — buy one at Auto Palms.';
     }
-    owned.forEach((c, i) => {
-      const m = CAR_MODELS[c.specKey] || { name: c.specKey };
-      const row = el('div', 'lv-dealer-row', this.garageRows);
-      row.innerHTML = `<span>${m.name} · cond ${c.cond}% · fuel ${c.fuel}%</span><span class="lv-price">Take out</span>`;
-      row.addEventListener('click', () => this.game.takeOutCar(i));
+    cars.forEach((c, i) => {
+      const m = CAR_MODELS[c.specKey];
+      const row = $('div', 'lv-dealer-row', this.garageRowsEl);
+      const name = $('span', '', row);
+      name.textContent = `${m?.name || c.specKey} — cond ${Math.round(c.cond)}% · fuel ${Math.round(c.fuel)}%`;
+      const btn = $('button', 'lv-btn lv-btn-small', row);
+      btn.textContent = 'TAKE OUT';
+      btn.addEventListener('click', () => g.takeOutCar(i));
     });
     this.garageEl.classList.remove('hidden');
+    this._refreshLayers();
   }
-
   hideGarage() {
     this.garageEl.classList.add('hidden');
+    this._refreshLayers();
+  }
+  showWheel(open) {
+    if (!open) { this.hideWheel(); return; }
+    const p = this.game.player;
+    this.wheelSlotsEl.innerHTML = '';
+    for (const id of Object.keys(p.weapons || { fists: {} })) {
+      const w = WEAPONS[id];
+      if (!w) continue;
+      const owned = p.weapons[id];
+      const mag = w.mag ? (p.weapon === id ? p.magAmmo : w.mag) : '∞';
+      const res = w.mag ? (owned?.ammo === Infinity ? '∞' : owned?.ammo ?? 0) : '∞';
+      const b = $('button', 'lv-wheel-slot' + (p.weapon === id ? ' active' : ''), this.wheelSlotsEl);
+      b.textContent = w.mag ? `${w.name}  ${mag} / ${res}` : w.name;
+      b.addEventListener('click', () => { p.setWeapon(id); this.updateWeapon(); this.hideWheel(); });
+    }
+    this.wheelEl.classList.remove('hidden');
+    this._refreshLayers();
+  }
+  hideWheel() {
+    this.wheelEl.classList.add('hidden');
+    this._refreshLayers();
   }
 
-  // -- phone / pause -------------------------------------------------------------------
-  showPhone(show) {
-    this.phoneEl.classList.toggle('hidden', !show);
-    if (show) {
-      const g = this.game;
-      const h = g.weather ? Math.floor(g.weather.hour || 12) : 12;
-      this.phoneTime.textContent = `${String(h).padStart(2, '0')}:00 — La Vega`;
+  // -- phone / pause / settings / credits -------------------------------------------------
+  showPhone(open) {
+    if (!open) { this.phoneEl.classList.add('hidden'); this._refreshLayers(); return; }
+    this._renderPhone('contacts');
+    this.phoneEl.classList.remove('hidden');
+    this._refreshLayers();
+  }
+  _renderPhone(tab) {
+    const g = this.game;
+    this.phoneBodyEl.innerHTML = '';
+    if (tab === 'contacts') {
+      for (const [name, desc, tip] of [
+        ['LA ROSA', 'Club owner — at the club', 'La Rosa is waiting at the club. Talk to her to start the first job.'],
+        ['MANNY', 'Mechanic — at the garage', "Manny's Garage repairs, refuels and resprays your car."],
+        ['MAYA', 'Crew driver — your partner', 'Press V to switch to Maya. You share money and progress.'],
+        ['CREW', 'Muscle · Driver · Hacker', 'Crew abilities: Z swap plates, C quick fix, G eyes out.'],
+      ]) {
+        const c = $('div', 'lv-contact', this.phoneBodyEl);
+        $('div', 'lv-contact-name', c).textContent = name;
+        $('div', 'lv-contact-desc', c).textContent = desc;
+        c.addEventListener('click', () => this.notify(tip));
+      }
+    } else if (tab === 'social') {
+      if (!this._posts.length) {
+        const p = $('div', 'lv-phone-post', this.phoneBodyEl);
+        p.textContent = 'La Vega Social — quiet for now. Make some noise and the city will talk.';
+      }
+      for (const post of this._posts.slice(0, 6)) {
+        const p = $('div', 'lv-phone-post', this.phoneBodyEl);
+        p.textContent = post;
+      }
+    } else {
+      const d = this.districtName();
+      const m = g.missions;
+      const obj = m?.current && m.step ? m.step.text : (m?.nextMission ? `Next job: ${m.nextMission.name} — talk to La Rosa at the club.` : 'Free roam — La Vega is yours.');
+      const p = $('div', 'lv-phone-post', this.phoneBodyEl);
+      p.textContent = `You are in ${d}. ${obj}`;
+      const p2 = $('div', 'lv-phone-post', this.phoneBodyEl);
+      p2.textContent = 'GPS: follow the yellow beam to your objective.';
     }
   }
-
-  showPause(show) {
-    this.pauseEl.classList.toggle('hidden', !show);
+  showPause(open) {
+    if (!open) { this.pauseEl.classList.add('hidden'); this._refreshLayers(); return; }
+    const g = this.game;
+    const p = g.player;
+    this.pauseStatsEl.textContent = `$${(p.money || 0).toLocaleString()} · job ${(g.missions?.nextIdx || 0)}/12 · DAY ${g.weather?.day || 1} · ${g.weather?.clockText ? g.weather.clockText() : ''}`;
+    this.pauseEl.classList.remove('hidden');
+    this._refreshLayers();
+  }
+  showSettings() {
+    this.menuEl.classList.add('hidden');
+    this.pauseEl.classList.add('hidden');
+    this.settingsEl.classList.remove('hidden');
+    this._refreshLayers();
+  }
+  showCredits() {
+    this.menuEl.classList.add('hidden');
+    this.creditsEl.classList.remove('hidden');
+    this._refreshLayers();
   }
 
-  // -- feedback popups ---------------------------------------------------------------------
-  showDrift(score) {
-    this.driftEl.textContent = `DRIFT +${Math.round(score)}`;
-    this.driftEl.classList.remove('hidden');
-    clearTimeout(this._driftTO);
-    this._driftTO = setTimeout(() => this.driftEl.classList.add('hidden'), 1300);
+  // -- mission panel / weapon / character / district --------------------------------------
+  updateMissionPanel() {
+    const g = this.game;
+    const m = g.missions;
+    if (!m) return;
+    if (m.current && m.step) {
+      this.missionPanelEl.innerHTML = '';
+      const t1 = $('div', '', this.missionPanelEl);
+      t1.style.cssText = 'color:#ffd34d;font-weight:900';
+      t1.textContent = `MISSION ${m.current.id}/12 — ${m.current.name}`;
+      const t2 = $('div', '', this.missionPanelEl);
+      t2.textContent = m.step.text || '';
+      if (g.taxi) {
+        const t3 = $('div', '', this.missionPanelEl);
+        t3.textContent = `Taxi: ${g.taxi.dest?.name || ''} — ${Math.ceil(g.taxi.t || 0)}s left.`;
+      }
+    } else if (m.nextMission) {
+      this.missionPanelEl.innerHTML = '';
+      const t1 = $('div', '', this.missionPanelEl);
+      t1.style.cssText = 'color:#ffd34d;font-weight:900';
+      t1.textContent = `NEXT JOB ${m.nextMission.id}/12 — ${m.nextMission.name}`;
+      const t2 = $('div', '', this.missionPanelEl);
+      t2.textContent = 'Talk to La Rosa at the club (press E).';
+    } else {
+      this.missionPanelEl.innerHTML = '';
+      const t1 = $('div', '', this.missionPanelEl);
+      t1.style.cssText = 'color:#7dff8a;font-weight:900';
+      t1.textContent = 'LA VEGA IS YOURS';
+      const t2 = $('div', '', this.missionPanelEl);
+      t2.textContent = 'Free roam — find work at the club.';
+    }
   }
-
-  socialPost(user, text) {
-    const post = el('div', 'lv-panel lv-post', this.socialEl, `<b>${user}</b><br>${text}`);
-    while (this.socialEl.children.length > 3) this.socialEl.lastChild.remove();
-    setTimeout(() => post.remove(), 9000);
+  updateWeapon() {
+    const p = this.game.player;
+    if (!p) return;
+    const w = WEAPONS[p.weapon] || WEAPONS.fists;
+    if (!w.mag) { this.weaponEl.textContent = w.name; return; }
+    const mag = p.magAmmo === Infinity ? '∞' : p.magAmmo;
+    const res = p.weapons[p.weapon]?.ammo;
+    const resTxt = res === Infinity || res === undefined ? '∞' : res;
+    this.weaponEl.textContent = `${w.name} ${mag} / ${resTxt}`;
   }
-
-  showReward(text, sub) {
-    this.rewardMain.textContent = text || '';
-    this.rewardSub.textContent = sub || '';
-    this.rewardEl.classList.remove('hidden');
-    clearTimeout(this._rewardTO);
-    this._rewardTO = setTimeout(() => this.rewardEl.classList.add('hidden'), 4000);
+  updateCharacter() {
+    const p = this.game.player;
+    if (!p) return;
+    this.rankEl.textContent = `RANK ${this.game.rank || 0} · ${RANK_NAMES[this.game.rank || 0] || 'NEWCOMER'}`;
   }
-
-  flashWanted() {
-    this.starsEl.style.transform = 'scale(1.3)';
-    this.starsEl.style.color = '#ff5a5a';
-    setTimeout(() => { this.starsEl.style.transform = ''; this.starsEl.style.color = ''; }, 350);
-  }
-
-  showBusted(paid) {
-    this.bustedText.textContent = paid ? `The LVPD impounded your ride. You paid $${paid} in fines.` : 'Busted — the LVPD let you go with a warning.';
-    this.bustedEl.classList.remove('hidden');
-  }
-
-  flashDamage() {
-    this.vignetteEl.style.opacity = '1';
-    setTimeout(() => { this.vignetteEl.style.opacity = '0'; }, 180);
-  }
-
-  // -- district + character + money + weapon ----------------------------------------------------
   districtName() {
     const p = this.game.player;
     if (!p) return 'LA VEGA';
-    if (p.x < 15) return 'THE BAY';
     for (const d of DISTRICTS) {
       if (p.x >= d.x0 && p.x < d.x1 && p.z >= d.z0 && p.z < d.z1) return d.name;
     }
     return 'LA VEGA';
   }
-
-  updateCharacter() {
+  _streetName() {
     const p = this.game.player;
-    if (!p) return;
-    this._selectedChar = p.charId || 'jax';
-    this.charJax.classList.toggle('sel', this._selectedChar === 'jax');
-    this.charMaya.classList.toggle('sel', this._selectedChar === 'maya');
+    if (!p) return '';
+    let best = null, bd = Infinity, axis = 'x', idx = 0;
+    ROADS.forEach((r, i) => {
+      const d = Math.abs(p.x - r);
+      if (d < bd) { bd = d; best = STREET_NS[i]; axis = 'x'; idx = i; }
+      const d2 = Math.abs(p.z - r);
+      if (d2 < bd) { bd = d2; best = STREET_EW[i]; axis = 'z'; idx = i; }
+    });
+    void axis; void idx;
+    return best || '';
   }
 
-  updateMoney() {
-    const p = this.game.player;
-    if (!p) return;
-    this.moneyEl.textContent = `$${Math.floor(p.money || 0).toLocaleString()}`;
-  }
-
-  updateWeapon() {
-    const p = this.game.player;
-    if (!p) return;
-    const w = WEAPONS[p.weapon] || WEAPONS.fists;
-    if (p.weapon === 'fists' || !w.mag) {
-      this.weaponName.textContent = 'FISTS ∞';
-      this.weaponAmmo.textContent = 'Unarmed — press Q to punch';
-      return;
-    }
-    const reserve = p.weapons && p.weapons[p.weapon] ? p.weapons[p.weapon].ammo : 0;
-    // One text node holds the full label ("PISTOL 12 / 60").
-    this.weaponName.textContent = `${w.name} ${p.magAmmo} / ${reserve}`;
-    this.weaponAmmo.textContent = `Reserve ${reserve} — X to reload`;
-  }
-
-  // -- minimap ---------------------------------------------------------------------------
-  _drawMinimap() {
+  // -- per-frame update -----------------------------------------------------------------------
+  update(dt) {
     const g = this.game;
-    const ctx = this.mapCanvas.getContext('2d');
-    if (!ctx) return;
-    const S = 190 / 400;
-    ctx.fillStyle = '#20301e';
-    ctx.fillRect(0, 0, 190, 190);
-    ctx.fillStyle = '#1a4a6a';
-    ctx.fillRect(0, 0, 15 * S, 190);
-    ctx.fillStyle = '#c8b078';
-    ctx.fillRect(15 * S, 0, 15 * S, 190);
-    ctx.strokeStyle = '#5a5a66';
-    ctx.lineWidth = 3;
-    for (const r of ROADS) {
-      ctx.beginPath(); ctx.moveTo(r * S, 0); ctx.lineTo(r * S, 190); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(0, r * S); ctx.lineTo(190, r * S); ctx.stroke();
+    const p = g.player;
+    if (!p || g.state !== 'playing') return;
+    // Timers.
+    if (this._cardTimer > 0) {
+      this._cardTimer -= dt;
+      if (this._cardTimer <= 0) this._hideCard();
     }
-    if (g.city && g.city.colliders) {
-      ctx.fillStyle = '#3a3a44';
-      for (const c of g.city.colliders) {
-        ctx.fillRect(c.x0 * S, c.z0 * S, Math.max(1, (c.x1 - c.x0) * S), Math.max(1, (c.z1 - c.z0) * S));
+    if (this._districtTimer > 0) {
+      this._districtTimer -= dt;
+      if (this._districtTimer <= 0) { this.districtEl.style.display = 'none'; this._refreshLayers(); }
+    }
+    if (this._hintTimer > 0) {
+      this._hintTimer -= dt;
+      if (this._hintTimer <= 0) { this.hintEl.classList.add('hidden'); this._refreshLayers(); }
+    }
+    // Top bar.
+    this.moneyEl.textContent = `$${Math.floor(p.money || 0).toLocaleString()}`;
+    this.rankEl.textContent = `RANK ${g.rank || 0} · ${RANK_NAMES[g.rank || 0] || 'NEWCOMER'}`;
+    if (g.weather?.clockText) this.clockEl.textContent = `DAY ${g.weather.day || 1} · ${g.weather.clockText()}`;
+    if (g.audio?.stationIdx !== undefined) {
+      const names = ['Neon Tide FM 98.6', 'Mango Radio 101', 'Static Dub 88.1'];
+      this.radioEl.textContent = names[g.audio.stationIdx] || '';
+    }
+    this.updateWeapon();
+    // Stars.
+    const wanted = g.police?.wanted || 0;
+    let stars = '';
+    for (let i = 0; i < 5; i++) stars += `<span class="lv-star${i < wanted ? ' on' : ''}">${i < wanted ? '★' : '☆'}</span>`;
+    if (this.starsEl.innerHTML !== stars) this.starsEl.innerHTML = stars;
+    // Bars.
+    this.hpFill.style.width = `${clamp(p.health || 0, 0, 100)}%`;
+    this.armorFill.style.width = `${clamp(p.armor || 0, 0, 100)}%`;
+    this.stamFill.style.width = `${clamp(p.stamina || 0, 0, 100)}%`;
+    // Location: district / street / standing.
+    const dName = this.districtName();
+    const street = this._streetName();
+    const dKey = (DISTRICTS.find((d) => d.name === dName)?.key) || 'marina';
+    const standing = Math.round(g.standing?.[dKey === 'beach' ? 'south' : dKey] || 0);
+    this.locEl.textContent = `${dName}${street ? ` · ${street}` : ''} · ${standing}%`;
+    // District banner: once per entry, short-lived, never under a modal.
+    if (dName !== this._lastDistrict) {
+      this._lastDistrict = dName;
+      if (g.state === 'playing' && (g.cutsceneT || 0) <= 0) {
+        this.districtNameEl.textContent = dName;
+        this.districtSubEl.textContent = `${street} · standing ${standing}%`;
+        this._districtTimer = 3.5;
+        this._refreshLayers();
       }
     }
-    const step = g.missions ? g.missions.step : null;
-    if (step && typeof step.x === 'number' && typeof step.z === 'number') {
-      ctx.fillStyle = '#ffd34d';
-      ctx.beginPath(); ctx.arc(step.x * S, step.z * S, 5, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = '#ffd34d';
-      ctx.beginPath(); ctx.arc(step.x * S, step.z * S, 8, 0, Math.PI * 2); ctx.stroke();
+    // Car HUD.
+    const car = g.vehicles?.playerCar || g.vehicles?.playerBoat || g.vehicles?.playerHeli;
+    if (car) {
+      this.carHudEl.classList.remove('hidden');
+      const kmh = Math.round(Math.abs(car.speed || 0) * 3.6);
+      const name = car.kind === 'heli' ? 'HELICOPTER' : car.kind === 'boat' ? 'SPEEDBOAT' : car.kind === 'jetski' ? 'JET SKI' : (CAR_MODELS[car.specKey]?.name || car.specKey).toUpperCase();
+      this.carHudEl.innerHTML = `<div class="lv-car-name">${name}</div><div class="lv-car-speed">${kmh} km/h</div><div>FUEL ${Math.round(car.fuel || 0)}% · COND ${Math.round(car.cond || 0)}%</div>`;
+    } else this.carHudEl.classList.add('hidden');
+    // Dispatch board.
+    if (wanted > 0 && g.police?.getDispatch) {
+      const d = g.police.getDispatch();
+      this.dispatchEl.classList.remove('hidden');
+      const seen = d.units.some((u) => u.seen);
+      let html = `<b>LVPD DISPATCH — ${wanted}★ ${seen ? '<span class="lv-blink">IN SIGHT</span>' : 'HIDDEN'}</b><br>`;
+      for (const u of d.units.slice(0, 5)) html += `${u.tactic} · ${u.dist}m · ${u.seen ? 'SEEN' : 'searching'}<br>`;
+      if (d.heli) html += 'LVPD AIR overhead — spotlight on you.<br>';
+      if (d.swat) html += 'SWAT on scene.<br>';
+      if (d.roadblock) html += 'Roadblock ahead — spike strips.<br>';
+      if (this.dispatchEl.innerHTML !== html) this.dispatchEl.innerHTML = html;
+    } else this.dispatchEl.classList.add('hidden');
+    // Crosshair: aiming with a firearm on foot.
+    const aiming = g.aiming && p.weapon !== 'fists' && !p.inCar && !p.inBoat && !p.inHeli;
+    this.crosshairEl.classList.toggle('hidden', !aiming);
+    // Collectibles counter.
+    if (g.collectibles) {
+      const got = g.collectibles.filter((c) => c.taken).length;
+      this.collectEl.classList.remove('hidden');
+      this.collectEl.textContent = `★ ${got}/${g.collectibles.length}`;
     }
-    const dot = (x, z, color, r) => {
-      ctx.fillStyle = color;
-      ctx.beginPath(); ctx.arc(x * S, z * S, r, 0, Math.PI * 2); ctx.fill();
-    };
-    if (g.characters && g.characters.npcs) {
-      for (const n of g.characters.npcs.slice(0, 60)) if (!n.dead) dot(n.x, n.z, '#7dff8a', 1.6);
-    }
-    if (g.vehicles) {
-      for (const c of g.vehicles.cars.slice(0, 60)) dot(c.x, c.z, '#ff8c1a', 1.8);
-    }
-    if (g.police && g.police.units) {
-      for (const u of g.police.units) if (u.car) dot(u.car.x, u.car.z, '#2a6fd6', 2.2);
-    }
+    // Minimap (throttled to every other frame).
+    this._mapT += dt;
+    if (this._mapT > 0.05) { this._mapT = 0; this._drawMinimap(); }
+  }
+
+  _drawMinimap() {
+    const g = this.game;
     const p = g.player;
-    if (p) {
-      ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(p.x * S, p.z * S);
-      ctx.lineTo((p.x + Math.sin(p.heading) * 10) * S, (p.z + Math.cos(p.heading) * 10) * S);
-      ctx.stroke();
-      dot(p.x, p.z, '#ffffff', 3.2);
-      ctx.strokeStyle = '#ff2a9d';
-      ctx.beginPath(); ctx.arc(p.x * S, p.z * S, 5, 0, Math.PI * 2); ctx.stroke();
+    if (!p) return;
+    const ctx = this.mapCanvas.getContext('2d');
+    const S = 200;
+    const scale = S / 280;
+    const X = (x) => x * scale;
+    const Z = (z) => z * scale;
+    ctx.clearRect(0, 0, S, S);
+    // District quadrants.
+    const quadCols = ['#2a4a6e', '#3a3a4a', '#4a2a5e', '#6e5a2a'];
+    const quads = [[0, 0, 130, 130], [130, 0, 130, 130], [0, 130, 130, 130], [130, 130, 130, 130]];
+    quads.forEach(([x0, z0, w, h], i) => {
+      ctx.fillStyle = quadCols[i];
+      ctx.fillRect(X(x0), Z(z0), w * scale, h * scale);
+    });
+    // Sea + sand (west edge).
+    ctx.fillStyle = '#2f9fd8';
+    ctx.fillRect(0, 0, X(15), S);
+    ctx.fillStyle = '#f2d492';
+    ctx.fillRect(X(15), 0, X(15), S);
+    // Roads.
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.lineWidth = 2;
+    for (const r of ROADS) {
+      ctx.beginPath(); ctx.moveTo(X(r), Z(0)); ctx.lineTo(X(r), Z(260)); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(X(0), Z(r)); ctx.lineTo(X(260), Z(r)); ctx.stroke();
     }
+    // Mission marker (yellow diamond).
+    const mp = g.missions?.markerPos;
+    if (mp) {
+      ctx.fillStyle = '#ffd34d';
+      ctx.beginPath();
+      ctx.moveTo(X(mp.x), Z(mp.z) - 7);
+      ctx.lineTo(X(mp.x) + 7, Z(mp.z));
+      ctx.lineTo(X(mp.x), Z(mp.z) + 7);
+      ctx.lineTo(X(mp.x) - 7, Z(mp.z));
+      ctx.closePath();
+      ctx.fill();
+    }
+    // Police blips (blue).
+    if (g.police?.units) {
+      ctx.fillStyle = '#4da3ff';
+      for (const u of g.police.units) {
+        if (!u.car) continue;
+        ctx.beginPath();
+        ctx.arc(X(u.car.x), Z(u.car.z), 3.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // Player car blip (green) + player arrow (white/pink, rotated).
+    const pc = g.vehicles?.playerCar;
+    if (pc) {
+      ctx.fillStyle = '#7dff8a';
+      ctx.beginPath();
+      ctx.arc(X(pc.x), Z(pc.z), 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.save();
+    ctx.translate(X(p.x), Z(p.z));
+    ctx.rotate(-p.heading + Math.PI);
+    ctx.fillStyle = '#ff2a9d';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, -7);
+    ctx.lineTo(5, 6);
+    ctx.lineTo(-5, 6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
   }
 }

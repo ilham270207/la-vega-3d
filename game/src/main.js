@@ -1125,7 +1125,10 @@ export class Game {
     // 3 stunt jump spots (in the park — never on a road). Each gets a
     // VISIBLE yellow ramp wedge + flag pole, so the player can actually
     // find them (GAP 9: the old spots were bare coordinates — invisible).
-    const spots = [[104, 70], [112, 86], [96, 86]];
+    // R8: spots sit deep inside Palm Court Park (94..114, 70..86), well
+    // clear of the road-65 / road-91 sidewalks — the old edge spots read
+    // as yellow wedges ON the road from street level.
+    const spots = [[104, 78], [100, 76], [108, 80]];
     for (const [x, z] of spots) {
       this.stunts.push({ x, z, cd: 0, hinted: false });
       const gy = groundHeight(x, z);
